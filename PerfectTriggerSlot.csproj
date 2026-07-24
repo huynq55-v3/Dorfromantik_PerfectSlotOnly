@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Đổi TargetFramework sang netstandard2.0 để chạy mượt mà trên Linux -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>PerfectTriggerSlot</AssemblyName>
+    <RootNamespace>PerfectTriggerSlot</RootNamespace>
+    <Version>2.0.0</Version>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Tham chiếu BepInEx -->
+    <Reference Include="BepInEx">
+      <HintPath>BepInEx/core/BepInEx.dll</HintPath>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>BepInEx/core/0Harmony.dll</HintPath>
+    </Reference>
+
+    <!-- Tham chiếu DLL Game -->
+    <Reference Include="Assembly-CSharp">
+      <HintPath>Dorfromantik_Data/Managed/Assembly-CSharp.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>Dorfromantik_Data/Managed/UnityEngine.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>Dorfromantik_Data/Managed/UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>Dorfromantik_Data/Managed/UnityEngine.IMGUIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>Dorfromantik_Data/Managed/UnityEngine.PhysicsModule.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Dorfromantik.cs" />
+  </ItemGroup>
+
+  <Target Name="CopyPluginToBepInEx" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ProjectDir)BepInEx/plugins/" />
+  </Target>
+
+</Project>
