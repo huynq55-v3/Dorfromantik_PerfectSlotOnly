@@ -10,7 +10,7 @@ namespace PerfectTriggerSlot
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
         private const string modName = "Perfect Trigger Slot Highlighter";
-        private const string modVersion = "4.4.0";
+        private const string modVersion = "5.0.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
@@ -23,10 +23,11 @@ namespace PerfectTriggerSlot
             Log = Logger;
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
-            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (CORRECT EDGE MAPPING RESOLVED) ACTIVE!");
+            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (ALWAYS HIGHLIGHT 5/5 MATCHED TILES) ACTIVE!");
             Log.LogWarning("=================================================");
         }
 
+        // Authoritative Native Hex Neighbor Resolution using GridCalculator.GetNeighborGridPositions
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
         {
             try
@@ -90,21 +91,6 @@ namespace PerfectTriggerSlot
             return list != null ? list.Count : 0;
         }
 
-        private static ElementGroup GetHeldTileWorldElementGroup(Tile heldTile, int worldDir, int rot, GroupType targetType = null)
-        {
-            if (heldTile == null) return null;
-            int localEdge = (worldDir - rot + 600) % 6;
-            return heldTile.GetElementGroup(localEdge, Space.Self, targetType);
-        }
-
-        private static int GetHeldTileHybridEdgeCount(Tile heldTile, int worldDir, int rot)
-        {
-            if (heldTile == null) return 0;
-            int localEdge = (worldDir - rot + 600) % 6;
-            var list = heldTile.GetHybridEdges(localEdge, Space.Self);
-            return list != null ? list.Count : 0;
-        }
-
         private static bool CheckEdgeMatch(Tile tileA, int dirA, Tile tileB, int dirB)
         {
             if (tileA == null || tileB == null) return false;
@@ -148,54 +134,11 @@ namespace PerfectTriggerSlot
             return false;
         }
 
-        private static bool CheckHeldTileEdgeMatch(Tile heldTile, int dirA, int rot, Tile tileB, int dirB)
-        {
-            if (heldTile == null || tileB == null) return false;
-
-            ElementGroup elemA = GetHeldTileWorldElementGroup(heldTile, dirA, rot, null);
-            GroupType groupA = elemA?.GroupType;
-
-            ElementGroup elemB = GetWorldElementGroup(tileB, dirB, null);
-            GroupType groupB = elemB?.GroupType;
-
-            if (groupA == groupB) return true;
-
-            if (groupA != null && groupB != null)
-            {
-                if (groupA == groupB || groupA.id == groupB.id || groupA.name == groupB.name)
-                {
-                    return true;
-                }
-
-                ElementGroup matchA = GetWorldElementGroup(tileB, dirB, groupA);
-                if (matchA != null && matchA.GroupType != null)
-                {
-                    if (matchA.GroupType == groupA || matchA.GroupType.id == groupA.id)
-                        return true;
-                }
-
-                ElementGroup matchB = GetHeldTileWorldElementGroup(heldTile, dirA, rot, groupB);
-                if (matchB != null && matchB.GroupType != null)
-                {
-                    if (matchB.GroupType == groupB || matchB.GroupType.id == groupB.id)
-                        return true;
-                }
-            }
-
-            if ((GetHeldTileHybridEdgeCount(heldTile, dirA, rot) > 0 && groupB == null) ||
-                (GetWorldHybridEdgeCount(tileB, dirB) > 0 && groupA == null))
-            {
-                return true;
-            }
-
-            return false;
-        }
-
         private static int GetOppositeNeighborDir(Vector2Int fromPos, Vector2Int toPos, int defaultDir)
         {
             try
             {
-                var method = typeof(GridCalculator).GetMethod("GetNeighborIndexFromGridPos", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static);
+                var method = typeof(GridCalculator).GetMethod("GetNeighborIndexFromGridPos", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance);
                 if (method != null)
                 {
                     object instance = null;
@@ -221,8 +164,6 @@ namespace PerfectTriggerSlot
             int filledCount = 0;
             bool allFilledMatched = true;
 
-            List<string> edgeDetails = new List<string>();
-
             for (int i = 0; i < 6; i++)
             {
                 Tile neighbor = world.GetTile(neighborPositions[i]);
@@ -230,11 +171,6 @@ namespace PerfectTriggerSlot
                 {
                     int oppositeDir = GetOppositeNeighborDir(centerTile.GridPos, neighbor.GridPos, i);
                     bool edgeMatch = CheckEdgeMatch(centerTile, i, neighbor, oppositeDir);
-
-                    ElementGroup g1 = GetWorldElementGroup(centerTile, i);
-                    ElementGroup g2 = GetWorldElementGroup(neighbor, oppositeDir);
-
-                    edgeDetails.Add($"Dir{i}[{neighbor.GridPos}:{neighbor.name}]:{edgeMatch}({g1?.GroupType?.name ?? "Grass"} vs {g2?.GroupType?.name ?? "Grass"})");
 
                     if (!edgeMatch)
                     {
@@ -246,11 +182,6 @@ namespace PerfectTriggerSlot
                 {
                     emptyNeighborDir = i;
                 }
-            }
-
-            if (filledCount >= 4 || centerTile.GridPos == new Vector2Int(0, -1))
-            {
-                Log.LogWarning($"[Audit Tile {centerTile.GridPos}] ({centerTile.name}, rot={centerTile.RotationIndex}): Filled={filledCount}, AllMatched={allFilledMatched}, MissingDir={emptyNeighborDir}. Edges: {string.Join("; ", edgeDetails)}");
             }
 
             return filledCount == 5 && allFilledMatched;
@@ -325,16 +256,10 @@ namespace PerfectTriggerSlot
             }
         }
 
-        public static void RunHighlightScan(Tile heldTile)
+        public static void RunHighlightScan()
         {
-            if (heldTile == null)
-            {
-                TilePlacer placer = Object.FindObjectOfType<TilePlacer>();
-                if (placer != null) heldTile = placer.CurrentTile;
-            }
-
             World world = Object.FindObjectOfType<World>();
-            if (world == null || heldTile == null) return;
+            if (world == null) return;
 
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
@@ -345,22 +270,11 @@ namespace PerfectTriggerSlot
             {
                 if (centerTile == null) continue;
 
+                // Highlight EVERY tile on the board that has 5/5 matched edges and is waiting for its 6th neighbor!
                 if (IsTileWaitingFor6thPerfect(centerTile, world, out int emptyDir))
                 {
-                    Vector2Int[] neighbors = GetNeighborPositions(centerTile.GridPos);
-                    Vector2Int emptySlotPos = neighbors[emptyDir];
-
-                    int dirFromSlotToTile = GetOppositeNeighborDir(emptySlotPos, centerTile.GridPos, (emptyDir + 3) % 6);
-
-                    for (int rot = 0; rot < 6; rot++)
-                    {
-                        if (CheckHeldTileEdgeMatch(heldTile, dirFromSlotToTile, rot, centerTile, emptyDir))
-                        {
-                            activeTriggers.Add(centerTile);
-                            Log.LogWarning($"[PERFECT THIS TURN] Tile {centerTile.GridPos} CAN BECOME PERFECT IN THIS TURN with held tile placed at slot {emptySlotPos}!");
-                            break;
-                        }
-                    }
+                    activeTriggers.Add(centerTile);
+                    Log.LogWarning($"[ALWAYS PERFECT CANDIDATE] Tile {centerTile.GridPos} is 5/5 matched and waiting for 6th tile at dir {emptyDir}!");
                 }
             }
 
@@ -371,14 +285,14 @@ namespace PerfectTriggerSlot
         [HarmonyPostfix]
         private static void Postfix_UpdateTileSlotValidity(Tile newTile, ref Dictionary<Vector2Int, TileSlot> ___tileSlots)
         {
-            RunHighlightScan(newTile);
+            RunHighlightScan();
         }
 
         [HarmonyPatch(typeof(Dorfromantik.TilePlacementEventBroadcaster), "BroadcastTilePlacedFinalized")]
         [HarmonyPostfix]
         private static void Postfix_BroadcastTilePlacedFinalized(Tile placedTile, bool placedByPlayer)
         {
-            RunHighlightScan(null);
+            RunHighlightScan();
         }
     }
 }
