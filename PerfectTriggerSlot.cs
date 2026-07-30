@@ -9,8 +9,8 @@ namespace PerfectTriggerSlot
     public class PerfectTriggerSlotBase : BaseUnityPlugin
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
-        private const string modName = "Perfect Trigger Slot Highlighter & Radius Circle";
-        private const string modVersion = "5.1.0";
+        private const string modName = "Perfect Trigger Slot Highlighter & Dynamic Radius Circle";
+        private const string modVersion = "5.2.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
@@ -18,7 +18,7 @@ namespace PerfectTriggerSlot
         private static readonly Dictionary<Tile, GameObject> activeMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
 
-        // Quản lý đường tròn bán kính (Dùng MeshVisualizer)
+        // Quản lý đường tròn bán kính (Mesh Visualizer)
         private static GameObject radiusCircleObject;
         private static MeshFilter circleMeshFilter;
         private static MeshRenderer circleMeshRenderer;
@@ -28,12 +28,12 @@ namespace PerfectTriggerSlot
             Log = Logger;
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
-            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (HIGHLIGHT + RADIUS CIRCLE) ACTIVE!");
+            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (BLUE DYNAMIC CIRCLE) ACTIVE!");
             Log.LogWarning("=================================================");
         }
 
         // =========================================================================
-        // VẼ ĐƯỜNG TRÒN BẰNG MESH THUẦN (KHÔNG DÙNG LINERENDERER - KHÔNG LO LỖI DLL)
+        // LOGIC VẼ ĐƯỜNG TRÒN VỚI TÂM TỰ ĐỘNG & MÀU BLUE MỜ (DYNAMIC BOUNDING CIRCLE)
         // =========================================================================
 
         private static void InitRadiusCircle()
@@ -44,9 +44,22 @@ namespace PerfectTriggerSlot
             circleMeshFilter = radiusCircleObject.AddComponent<MeshFilter>();
             circleMeshRenderer = radiusCircleObject.AddComponent<MeshRenderer>();
 
-            // Tạo Material xanh lục tươi
+            // Dùng Shader Sprites/Default hỗ trợ Alpha Blending
             Material mat = new Material(Shader.Find("Sprites/Default"));
-            mat.color = new Color(0.0f, 1.0f, 0.2f, 0.85f);
+            
+            // Màu Xanh Dương (Blue) mờ dịu mắt (R: 0.1, G: 0.5, B: 1.0, Alpha: 0.35)
+            mat.color = new Color(0.1f, 0.5f, 1.0f, 0.35f);
+            
+            // Bật chế độ trong suốt cho Material
+            mat.SetFloat("_Mode", 2);
+            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            mat.SetInt("_ZWrite", 0);
+            mat.DisableKeyword("_ALPHATEST_ON");
+            mat.EnableKeyword("_ALPHABLEND_ON");
+            mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            mat.renderQueue = 3000;
+
             circleMeshRenderer.material = mat;
         }
 
@@ -60,18 +73,41 @@ namespace PerfectTriggerSlot
                 return;
             }
 
-            // Tính bán kính xa nhất từ (0,0)
+            // Step 1: Tìm tâm tự động (Centroid / Center of Mass) của toàn bộ các Tile
+            Vector3 centerSum = Vector3.zero;
+            int validCount = 0;
+
+            foreach (Tile tile in allPlacedTiles)
+            {
+                if (tile == null) continue;
+                Vector3 pos = tile.transform.position;
+                centerSum += new Vector3(pos.x, 0f, pos.z);
+                validCount++;
+            }
+
+            if (validCount == 0)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            // Tâm trọng trường trung bình của cụm Tile
+            Vector3 dynamicCenter = centerSum / validCount;
+
+            // Step 2: Tìm bán kính R_max tính từ Tâm Tự Động tới Tile xa nhất
             float maxRadius = 0f;
-            Vector3 origin = Vector3.zero;
 
             foreach (Tile tile in allPlacedTiles)
             {
                 if (tile == null) continue;
                 Vector3 tilePos = tile.transform.position;
                 Vector3 posFlat = new Vector3(tilePos.x, 0f, tilePos.z);
-                
-                float dist = Vector3.Distance(origin, posFlat);
-                if (dist > maxRadius) maxRadius = dist;
+
+                float dist = Vector3.Distance(dynamicCenter, posFlat);
+                if (dist > maxRadius)
+                {
+                    maxRadius = dist;
+                }
             }
 
             if (maxRadius <= 0.01f)
@@ -82,9 +118,9 @@ namespace PerfectTriggerSlot
 
             radiusCircleObject.SetActive(true);
 
-            // Tự dựng Mesh hình vòng nhẫn (Ring)
+            // Step 3: Dựng Mesh hình vòng nhẫn mờ xung quanh tâm động (dynamicCenter)
             int segments = 120;
-            float thickness = 0.3f; // Độ dầy của đường viền tròn
+            float thickness = 0.2f; // Đường viền mảnh và tinh tế hơn
             float innerRadius = maxRadius - (thickness / 2f);
             float outerRadius = maxRadius + (thickness / 2f);
 
@@ -93,7 +129,7 @@ namespace PerfectTriggerSlot
             int[] triangles = new int[segments * 6];
 
             const float TWO_PI = 6.28318530718f;
-            float heightY = 0.15f; // Độ cao nâng nhẹ lên khỏi mặt đất
+            float heightY = 0.12f; // Nâng nhẹ để nằm trên mặt đất
 
             for (int i = 0; i < segments; i++)
             {
@@ -101,8 +137,9 @@ namespace PerfectTriggerSlot
                 float cos = Mathf.Cos(angle);
                 float sin = Mathf.Sin(angle);
 
-                vertices[i * 2] = new Vector3(cos * innerRadius, heightY, sin * innerRadius);
-                vertices[i * 2 + 1] = new Vector3(cos * outerRadius, heightY, sin * outerRadius);
+                // Tọa độ đỉnh công thêm vị trí Tâm Động (dynamicCenter)
+                vertices[i * 2] = new Vector3(dynamicCenter.x + cos * innerRadius, heightY, dynamicCenter.z + sin * innerRadius);
+                vertices[i * 2 + 1] = new Vector3(dynamicCenter.x + cos * outerRadius, heightY, dynamicCenter.z + sin * outerRadius);
 
                 int nextIndex = (i + 1) % segments;
                 triangles[i * 6] = i * 2;
@@ -122,7 +159,7 @@ namespace PerfectTriggerSlot
         }
 
         // =========================================================================
-        // LOGIC HIGHLIGHT TILE & HEX GRID
+        // LOGIC HIGHLIGHT TILE & HEX GRID (GIỮ NGUYÊN)
         // =========================================================================
 
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
@@ -360,7 +397,7 @@ namespace PerfectTriggerSlot
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
-            // 1. Cập nhật đường tròn màu xanh lục (Tâm 0,0, bán kính đến Tile xa nhất)
+            // 1. Cập nhật đường tròn màu xanh dương với tâm động (Dynamic Center & Blue Circle)
             UpdateMaxRadiusCircle(allPlacedTiles);
 
             // 2. Quét Highlight các vị trí 5/5 matched
