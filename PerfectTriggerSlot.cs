@@ -9,8 +9,8 @@ namespace PerfectTriggerSlot
     public class PerfectTriggerSlotBase : BaseUnityPlugin
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
-        private const string modName = "Perfect Trigger Slot Highlighter";
-        private const string modVersion = "5.0.0";
+        private const string modName = "Perfect Trigger Slot Highlighter & Radius Circle";
+        private const string modVersion = "5.1.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
@@ -18,16 +18,113 @@ namespace PerfectTriggerSlot
         private static readonly Dictionary<Tile, GameObject> activeMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
 
+        // Quản lý đường tròn bán kính (Dùng MeshVisualizer)
+        private static GameObject radiusCircleObject;
+        private static MeshFilter circleMeshFilter;
+        private static MeshRenderer circleMeshRenderer;
+
         private void Awake()
         {
             Log = Logger;
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
-            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (ALWAYS HIGHLIGHT 5/5 MATCHED TILES) ACTIVE!");
+            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (HIGHLIGHT + RADIUS CIRCLE) ACTIVE!");
             Log.LogWarning("=================================================");
         }
 
-        // Authoritative Native Hex Neighbor Resolution using GridCalculator.GetNeighborGridPositions
+        // =========================================================================
+        // VẼ ĐƯỜNG TRÒN BẰNG MESH THUẦN (KHÔNG DÙNG LINERENDERER - KHÔNG LO LỖI DLL)
+        // =========================================================================
+
+        private static void InitRadiusCircle()
+        {
+            if (radiusCircleObject != null) return;
+
+            radiusCircleObject = new GameObject("MaxRadiusCircleVisualizer");
+            circleMeshFilter = radiusCircleObject.AddComponent<MeshFilter>();
+            circleMeshRenderer = radiusCircleObject.AddComponent<MeshRenderer>();
+
+            // Tạo Material xanh lục tươi
+            Material mat = new Material(Shader.Find("Sprites/Default"));
+            mat.color = new Color(0.0f, 1.0f, 0.2f, 0.85f);
+            circleMeshRenderer.material = mat;
+        }
+
+        private static void UpdateMaxRadiusCircle(List<Tile> allPlacedTiles)
+        {
+            InitRadiusCircle();
+
+            if (allPlacedTiles == null || allPlacedTiles.Count == 0)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            // Tính bán kính xa nhất từ (0,0)
+            float maxRadius = 0f;
+            Vector3 origin = Vector3.zero;
+
+            foreach (Tile tile in allPlacedTiles)
+            {
+                if (tile == null) continue;
+                Vector3 tilePos = tile.transform.position;
+                Vector3 posFlat = new Vector3(tilePos.x, 0f, tilePos.z);
+                
+                float dist = Vector3.Distance(origin, posFlat);
+                if (dist > maxRadius) maxRadius = dist;
+            }
+
+            if (maxRadius <= 0.01f)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            radiusCircleObject.SetActive(true);
+
+            // Tự dựng Mesh hình vòng nhẫn (Ring)
+            int segments = 120;
+            float thickness = 0.3f; // Độ dầy của đường viền tròn
+            float innerRadius = maxRadius - (thickness / 2f);
+            float outerRadius = maxRadius + (thickness / 2f);
+
+            Mesh ringMesh = new Mesh();
+            Vector3[] vertices = new Vector3[segments * 2];
+            int[] triangles = new int[segments * 6];
+
+            const float TWO_PI = 6.28318530718f;
+            float heightY = 0.15f; // Độ cao nâng nhẹ lên khỏi mặt đất
+
+            for (int i = 0; i < segments; i++)
+            {
+                float angle = (float)i / segments * TWO_PI;
+                float cos = Mathf.Cos(angle);
+                float sin = Mathf.Sin(angle);
+
+                vertices[i * 2] = new Vector3(cos * innerRadius, heightY, sin * innerRadius);
+                vertices[i * 2 + 1] = new Vector3(cos * outerRadius, heightY, sin * outerRadius);
+
+                int nextIndex = (i + 1) % segments;
+                triangles[i * 6] = i * 2;
+                triangles[i * 6 + 1] = i * 2 + 1;
+                triangles[i * 6 + 2] = nextIndex * 2;
+
+                triangles[i * 6 + 3] = nextIndex * 2;
+                triangles[i * 6 + 4] = i * 2 + 1;
+                triangles[i * 6 + 5] = nextIndex * 2 + 1;
+            }
+
+            ringMesh.vertices = vertices;
+            ringMesh.triangles = triangles;
+            ringMesh.RecalculateNormals();
+
+            circleMeshFilter.mesh = ringMesh;
+        }
+
+        // =========================================================================
+        // LOGIC HIGHLIGHT TILE & HEX GRID
+        // =========================================================================
+
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
         {
             try
@@ -73,7 +170,6 @@ namespace PerfectTriggerSlot
             return neighborPositions;
         }
 
-        // Authoritative Direct Hex Rotation Formula: LocalEdge = (WorldDir - RotationIndex + 600) mod 6
         private static ElementGroup GetWorldElementGroup(Tile tile, int worldDir, GroupType targetType = null)
         {
             if (tile == null) return null;
@@ -264,17 +360,19 @@ namespace PerfectTriggerSlot
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
+            // 1. Cập nhật đường tròn màu xanh lục (Tâm 0,0, bán kính đến Tile xa nhất)
+            UpdateMaxRadiusCircle(allPlacedTiles);
+
+            // 2. Quét Highlight các vị trí 5/5 matched
             HashSet<Tile> activeTriggers = new HashSet<Tile>();
 
             foreach (Tile centerTile in allPlacedTiles)
             {
                 if (centerTile == null) continue;
 
-                // Highlight EVERY tile on the board that has 5/5 matched edges and is waiting for its 6th neighbor!
                 if (IsTileWaitingFor6thPerfect(centerTile, world, out int emptyDir))
                 {
                     activeTriggers.Add(centerTile);
-                    Log.LogWarning($"[ALWAYS PERFECT CANDIDATE] Tile {centerTile.GridPos} is 5/5 matched and waiting for 6th tile at dir {emptyDir}!");
                 }
             }
 
