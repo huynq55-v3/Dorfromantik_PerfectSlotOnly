@@ -11,40 +11,34 @@ namespace PerfectTriggerSlot
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
         private const string modName = "Perfect Trigger Slot Highlighter & Dynamic Radius Circle";
-        private const string modVersion = "6.1.0";
+        private const string modVersion = "6.2.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
 
-        // Quản lý Marker cho các ô đã đặt (Tile)
         private static readonly Dictionary<Tile, GameObject> activeTileMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
 
-        // Quản lý Marker màu Tím cho các ô trống (TileSlot)
         private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
 
-        // Quản lý đường tròn bán kính (Blue Circle Visualizer)
         private static GameObject radiusCircleObject;
         private static MeshFilter circleMeshFilter;
         private static MeshRenderer circleMeshRenderer;
 
-        private enum MatchStatus { None, FourMatch, FiveMatch }
+        private enum MatchStatus { None, FourMatch, FiveMatch, SixMatch }
 
         private void Awake()
         {
             Log = Logger;
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
-            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} INITIALIZED!");
-            Log.LogWarning(" - Red Marker: 4/4 Matched Edges (Size = 1/2 Diameter)");
-            Log.LogWarning(" - Yellow Marker: 5/5 Matched Edges (Size = 1/2 Diameter)");
-            Log.LogWarning(" - Purple Marker: Clean Slot (Size = 1/2 Diameter)");
+            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} ACTIVE!");
+            Log.LogWarning(" - Green Marker: 6/6 Matched Edges (Perfect)");
+            Log.LogWarning(" - Yellow Marker: 5/5 Matched Edges");
+            Log.LogWarning(" - Red Marker: 4/4 Matched Edges");
+            Log.LogWarning(" - Purple Marker: Clean Slot for Current Tile");
             Log.LogWarning("=================================================");
         }
-
-        // =========================================================================
-        // 1. TẠO MARKER HÌNH TRỤ (CYLINDER)
-        // =========================================================================
 
         private static GameObject CreateMarkerObject(string name, Vector3 pos, Color color, Vector3 scale)
         {
@@ -66,10 +60,6 @@ namespace PerfectTriggerSlot
             marker.transform.localScale = scale;
             return marker;
         }
-
-        // =========================================================================
-        // 2. LOGIC QUÉT VÀ KIỂM TRA MATCH CẠNH (4 MATCH & 5 MATCH)
-        // =========================================================================
 
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
         {
@@ -245,16 +235,13 @@ namespace PerfectTriggerSlot
 
             if (allFilledMatched)
             {
-                if (filledCount == 5) return MatchStatus.FiveMatch; // Cần 5 ô -> Vàng
-                if (filledCount == 4) return MatchStatus.FourMatch; // Cần 4 ô -> Đỏ
+                if (filledCount == 6) return MatchStatus.SixMatch;  // 6/6 -> XANH LÁ CÂY
+                if (filledCount == 5) return MatchStatus.FiveMatch; // 5/5 -> VÀNG
+                if (filledCount == 4) return MatchStatus.FourMatch; // 4/4 -> ĐỎ
             }
 
             return MatchStatus.None;
         }
-
-        // =========================================================================
-        // 3. LOGIC KIỂM TRA Ô TRỐNG (TILE SLOT) CHO TILE ĐANG CẦM (MÀU TÍM)
-        // =========================================================================
 
         private static Tile GetCurrentHeldTile()
         {
@@ -308,10 +295,6 @@ namespace PerfectTriggerSlot
             return false;
         }
 
-        // =========================================================================
-        // 4. CẬP NHẬT HIGHLIGHT & MARKERS (ĐƯỜNG KÍNH = 1/2 CŨ)
-        // =========================================================================
-
         private static void SetTileMeshHighlight(Tile tile, bool highlight)
         {
             if (tile == null) return;
@@ -353,16 +336,25 @@ namespace PerfectTriggerSlot
                 Tile tile = kvp.Key;
                 MatchStatus status = kvp.Value;
 
-                Color targetColor = (status == MatchStatus.FiveMatch)
-                    ? new Color(1.0f, 0.9f, 0.0f, 0.85f)  // VÀNG (5/5 Match)
-                    : new Color(1.0f, 0.1f, 0.1f, 0.85f); // ĐỎ (4/4 Match)
+                Color targetColor;
+                if (status == MatchStatus.SixMatch)
+                {
+                    targetColor = new Color(0.0f, 1.0f, 0.2f, 0.85f);  // XANH LÁ CÂY (6/6)
+                }
+                else if (status == MatchStatus.FiveMatch)
+                {
+                    targetColor = new Color(1.0f, 0.9f, 0.0f, 0.85f);  // VÀNG (5/5)
+                }
+                else
+                {
+                    targetColor = new Color(1.0f, 0.1f, 0.1f, 0.85f);  // ĐỎ (4/4)
+                }
 
                 currentlyHighlightedTiles.Add(tile);
                 SetTileMeshHighlight(tile, true);
 
                 if (!activeTileMarkers.ContainsKey(tile) || activeTileMarkers[tile] == null)
                 {
-                    // KÍCH THƯỚC MỚI: Đường kính X, Z = 0.35f (giảm 1/2 so với 0.7f cũ -> Diện tích = 1/4)
                     GameObject marker = CreateMarkerObject("TileMatchMarker", tile.transform.position + new Vector3(0f, 0.35f, 0f), targetColor, new Vector3(0.35f, 0.05f, 0.35f));
                     activeTileMarkers[tile] = marker;
                 }
@@ -390,7 +382,7 @@ namespace PerfectTriggerSlot
             }
             foreach (TileSlot s in toRemove) activeSlotMarkers.Remove(s);
 
-            Color purpleColor = new Color(0.75f, 0.15f, 0.95f, 0.85f); // TÍM (Clean Slot)
+            Color purpleColor = new Color(0.75f, 0.15f, 0.95f, 0.85f); // TÍM
 
             foreach (TileSlot slot in cleanSlots)
             {
@@ -398,16 +390,11 @@ namespace PerfectTriggerSlot
 
                 if (!activeSlotMarkers.ContainsKey(slot) || activeSlotMarkers[slot] == null)
                 {
-                    // KÍCH THƯỚC MỚI: Đường kính X, Z = 0.325f (giảm 1/2 so với 0.65f cũ -> Diện tích = 1/4)
                     GameObject marker = CreateMarkerObject("CleanSlotMarker", slot.transform.position + new Vector3(0f, 0.25f, 0f), purpleColor, new Vector3(0.325f, 0.04f, 0.325f));
                     activeSlotMarkers[slot] = marker;
                 }
             }
         }
-
-        // =========================================================================
-        // 5. ĐƯỜNG TRÒN XANH DƯƠNG DYNAMIC (BOUNDING CIRCLE)
-        // =========================================================================
 
         private static void InitRadiusCircle()
         {
@@ -521,10 +508,6 @@ namespace PerfectTriggerSlot
             circleMeshFilter.mesh = ringMesh;
         }
 
-        // =========================================================================
-        // 6. QUÉT VÀ THỰC THI (MAIN SCAN)
-        // =========================================================================
-
         public static void RunHighlightScan()
         {
             World world = Object.FindObjectOfType<World>();
@@ -533,10 +516,10 @@ namespace PerfectTriggerSlot
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
-            // 1. Cập nhật đường tròn xanh dương
+            // 1. Cập nhật đường tròn
             UpdateMaxRadiusCircle(allPlacedTiles);
 
-            // 2. Quét ô Đỏ (4/4 Match) và Vàng (5/5 Match)
+            // 2. Quét ô Đỏ (4/4), Vàng (5/5) và Xanh lá (6/6)
             Dictionary<Tile, MatchStatus> tileStatuses = new Dictionary<Tile, MatchStatus>();
             foreach (Tile centerTile in allPlacedTiles)
             {
@@ -549,7 +532,7 @@ namespace PerfectTriggerSlot
             }
             UpdateTileMarkers(tileStatuses);
 
-            // 3. Quét ô Tím (Slot đặt Tile hiện tại không bị lệch cạnh)
+            // 3. Quét ô Tím (Slot đặt Tile hiện tại không bị lệch)
             HashSet<TileSlot> cleanSlots = new HashSet<TileSlot>();
             Tile heldTile = GetCurrentHeldTile();
 
@@ -573,10 +556,6 @@ namespace PerfectTriggerSlot
             }
             UpdateSlotMarkers(cleanSlots);
         }
-
-        // =========================================================================
-        // 7. HARMONY PATCHES
-        // =========================================================================
 
         [HarmonyPatch(typeof(TileSlotPreviewer), "UpdateTileSlotValidity")]
         [HarmonyPostfix]
