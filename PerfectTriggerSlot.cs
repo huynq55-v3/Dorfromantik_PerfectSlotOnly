@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
+using Dorfromantik;
 
 namespace PerfectTriggerSlot
 {
@@ -10,156 +11,64 @@ namespace PerfectTriggerSlot
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
         private const string modName = "Perfect Trigger Slot Highlighter & Dynamic Radius Circle";
-        private const string modVersion = "5.2.0";
+        private const string modVersion = "6.1.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
 
-        private static readonly Dictionary<Tile, GameObject> activeMarkers = new Dictionary<Tile, GameObject>();
+        // Quản lý Marker cho các ô đã đặt (Tile)
+        private static readonly Dictionary<Tile, GameObject> activeTileMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
 
-        // Quản lý đường tròn bán kính (Mesh Visualizer)
+        // Quản lý Marker màu Tím cho các ô trống (TileSlot)
+        private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
+
+        // Quản lý đường tròn bán kính (Blue Circle Visualizer)
         private static GameObject radiusCircleObject;
         private static MeshFilter circleMeshFilter;
         private static MeshRenderer circleMeshRenderer;
+
+        private enum MatchStatus { None, FourMatch, FiveMatch }
 
         private void Awake()
         {
             Log = Logger;
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
-            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} (BLUE DYNAMIC CIRCLE) ACTIVE!");
+            Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} INITIALIZED!");
+            Log.LogWarning(" - Red Marker: 4/4 Matched Edges (Size = 1/2 Diameter)");
+            Log.LogWarning(" - Yellow Marker: 5/5 Matched Edges (Size = 1/2 Diameter)");
+            Log.LogWarning(" - Purple Marker: Clean Slot (Size = 1/2 Diameter)");
             Log.LogWarning("=================================================");
         }
 
         // =========================================================================
-        // LOGIC VẼ ĐƯỜNG TRÒN VỚI TÂM TỰ ĐỘNG & MÀU BLUE MỜ (DYNAMIC BOUNDING CIRCLE)
+        // 1. TẠO MARKER HÌNH TRỤ (CYLINDER)
         // =========================================================================
 
-        private static void InitRadiusCircle()
+        private static GameObject CreateMarkerObject(string name, Vector3 pos, Color color, Vector3 scale)
         {
-            if (radiusCircleObject != null) return;
+            GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            marker.name = name;
 
-            radiusCircleObject = new GameObject("MaxRadiusCircleVisualizer");
-            circleMeshFilter = radiusCircleObject.AddComponent<MeshFilter>();
-            circleMeshRenderer = radiusCircleObject.AddComponent<MeshRenderer>();
+            Collider col = marker.GetComponent<Collider>();
+            if (col != null) Object.Destroy(col);
 
-            // Dùng Shader Sprites/Default hỗ trợ Alpha Blending
-            Material mat = new Material(Shader.Find("Sprites/Default"));
-            
-            // Màu Xanh Dương (Blue) mờ dịu mắt (R: 0.1, G: 0.5, B: 1.0, Alpha: 0.35)
-            mat.color = new Color(0.1f, 0.5f, 1.0f, 0.35f);
-            
-            // Bật chế độ trong suốt cho Material
-            mat.SetFloat("_Mode", 2);
-            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            mat.SetInt("_ZWrite", 0);
-            mat.DisableKeyword("_ALPHATEST_ON");
-            mat.EnableKeyword("_ALPHABLEND_ON");
-            mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-            mat.renderQueue = 3000;
-
-            circleMeshRenderer.material = mat;
-        }
-
-        private static void UpdateMaxRadiusCircle(List<Tile> allPlacedTiles)
-        {
-            InitRadiusCircle();
-
-            if (allPlacedTiles == null || allPlacedTiles.Count == 0)
+            Renderer r = marker.GetComponent<Renderer>();
+            if (r != null)
             {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
+                Material mat = new Material(Shader.Find("Sprites/Default"));
+                mat.color = color;
+                r.material = mat;
             }
 
-            // Step 1: Tìm tâm tự động (Centroid / Center of Mass) của toàn bộ các Tile
-            Vector3 centerSum = Vector3.zero;
-            int validCount = 0;
-
-            foreach (Tile tile in allPlacedTiles)
-            {
-                if (tile == null) continue;
-                Vector3 pos = tile.transform.position;
-                centerSum += new Vector3(pos.x, 0f, pos.z);
-                validCount++;
-            }
-
-            if (validCount == 0)
-            {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
-            }
-
-            // Tâm trọng trường trung bình của cụm Tile
-            Vector3 dynamicCenter = centerSum / validCount;
-
-            // Step 2: Tìm bán kính R_max tính từ Tâm Tự Động tới Tile xa nhất
-            float maxRadius = 0f;
-
-            foreach (Tile tile in allPlacedTiles)
-            {
-                if (tile == null) continue;
-                Vector3 tilePos = tile.transform.position;
-                Vector3 posFlat = new Vector3(tilePos.x, 0f, tilePos.z);
-
-                float dist = Vector3.Distance(dynamicCenter, posFlat);
-                if (dist > maxRadius)
-                {
-                    maxRadius = dist;
-                }
-            }
-
-            if (maxRadius <= 0.01f)
-            {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
-            }
-
-            radiusCircleObject.SetActive(true);
-
-            // Step 3: Dựng Mesh hình vòng nhẫn mờ xung quanh tâm động (dynamicCenter)
-            int segments = 120;
-            float thickness = 0.2f; // Đường viền mảnh và tinh tế hơn
-            float innerRadius = maxRadius - (thickness / 2f);
-            float outerRadius = maxRadius + (thickness / 2f);
-
-            Mesh ringMesh = new Mesh();
-            Vector3[] vertices = new Vector3[segments * 2];
-            int[] triangles = new int[segments * 6];
-
-            const float TWO_PI = 6.28318530718f;
-            float heightY = 0.12f; // Nâng nhẹ để nằm trên mặt đất
-
-            for (int i = 0; i < segments; i++)
-            {
-                float angle = (float)i / segments * TWO_PI;
-                float cos = Mathf.Cos(angle);
-                float sin = Mathf.Sin(angle);
-
-                // Tọa độ đỉnh công thêm vị trí Tâm Động (dynamicCenter)
-                vertices[i * 2] = new Vector3(dynamicCenter.x + cos * innerRadius, heightY, dynamicCenter.z + sin * innerRadius);
-                vertices[i * 2 + 1] = new Vector3(dynamicCenter.x + cos * outerRadius, heightY, dynamicCenter.z + sin * outerRadius);
-
-                int nextIndex = (i + 1) % segments;
-                triangles[i * 6] = i * 2;
-                triangles[i * 6 + 1] = i * 2 + 1;
-                triangles[i * 6 + 2] = nextIndex * 2;
-
-                triangles[i * 6 + 3] = nextIndex * 2;
-                triangles[i * 6 + 4] = i * 2 + 1;
-                triangles[i * 6 + 5] = nextIndex * 2 + 1;
-            }
-
-            ringMesh.vertices = vertices;
-            ringMesh.triangles = triangles;
-            ringMesh.RecalculateNormals();
-
-            circleMeshFilter.mesh = ringMesh;
+            marker.transform.position = pos;
+            marker.transform.localScale = scale;
+            return marker;
         }
 
         // =========================================================================
-        // LOGIC HIGHLIGHT TILE & HEX GRID (GIỮ NGUYÊN)
+        // 2. LOGIC QUÉT VÀ KIỂM TRA MATCH CẠNH (4 MATCH & 5 MATCH)
         // =========================================================================
 
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
@@ -179,23 +88,15 @@ namespace PerfectTriggerSlot
             if (gridPos.y % 2 == 0)
             {
                 offsets = new Vector2Int[] {
-                    new Vector2Int(0, 1),
-                    new Vector2Int(1, 1),
-                    new Vector2Int(1, 0),
-                    new Vector2Int(0, -1),
-                    new Vector2Int(-1, 0),
-                    new Vector2Int(-1, 1)
+                    new Vector2Int(0, 1),  new Vector2Int(1, 1),  new Vector2Int(1, 0),
+                    new Vector2Int(0, -1), new Vector2Int(-1, 0), new Vector2Int(-1, 1)
                 };
             }
             else
             {
                 offsets = new Vector2Int[] {
-                    new Vector2Int(0, 1),
-                    new Vector2Int(1, 0),
-                    new Vector2Int(1, -1),
-                    new Vector2Int(0, -1),
-                    new Vector2Int(-1, -1),
-                    new Vector2Int(-1, 0)
+                    new Vector2Int(0, 1),   new Vector2Int(1, 0),  new Vector2Int(1, -1),
+                    new Vector2Int(0, -1),  new Vector2Int(-1, -1),new Vector2Int(-1, 0)
                 };
             }
 
@@ -212,6 +113,13 @@ namespace PerfectTriggerSlot
             if (tile == null) return null;
             int rot = tile.RotationIndex;
             int localEdge = (worldDir - rot + 600) % 6;
+            return tile.GetElementGroup(localEdge, Space.Self, targetType);
+        }
+
+        private static ElementGroup GetWorldElementGroupWithRot(Tile tile, int worldDir, int customRot, GroupType targetType = null)
+        {
+            if (tile == null) return null;
+            int localEdge = (worldDir - customRot + 600) % 6;
             return tile.GetElementGroup(localEdge, Space.Self, targetType);
         }
 
@@ -238,28 +146,56 @@ namespace PerfectTriggerSlot
 
             if (groupA != null && groupB != null)
             {
-                if (groupA == groupB || groupA.id == groupB.id || groupA.name == groupB.name)
-                {
-                    return true;
-                }
+                if (groupA == groupB || groupA.id == groupB.id || groupA.name == groupB.name) return true;
 
                 ElementGroup matchA = GetWorldElementGroup(tileB, dirB, groupA);
-                if (matchA != null && matchA.GroupType != null)
-                {
-                    if (matchA.GroupType == groupA || matchA.GroupType.id == groupA.id)
-                        return true;
-                }
+                if (matchA != null && matchA.GroupType != null && (matchA.GroupType == groupA || matchA.GroupType.id == groupA.id))
+                    return true;
 
                 ElementGroup matchB = GetWorldElementGroup(tileA, dirA, groupB);
-                if (matchB != null && matchB.GroupType != null)
-                {
-                    if (matchB.GroupType == groupB || matchB.GroupType.id == groupB.id)
-                        return true;
-                }
+                if (matchB != null && matchB.GroupType != null && (matchB.GroupType == groupB || matchB.GroupType.id == groupB.id))
+                    return true;
             }
 
             if ((GetWorldHybridEdgeCount(tileA, dirA) > 0 && groupB == null) ||
                 (GetWorldHybridEdgeCount(tileB, dirB) > 0 && groupA == null))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool CheckEdgeMatchWithRot(Tile tileA, int rotA, int dirA, Tile tileB, int dirB)
+        {
+            if (tileA == null || tileB == null) return false;
+
+            ElementGroup elemA = GetWorldElementGroupWithRot(tileA, dirA, rotA, null);
+            GroupType groupA = elemA?.GroupType;
+
+            ElementGroup elemB = GetWorldElementGroup(tileB, dirB, null);
+            GroupType groupB = elemB?.GroupType;
+
+            if (groupA == groupB) return true;
+
+            if (groupA != null && groupB != null)
+            {
+                if (groupA.id == groupB.id || groupA.name == groupB.name) return true;
+
+                ElementGroup matchA = GetWorldElementGroup(tileB, dirB, groupA);
+                if (matchA != null && matchA.GroupType != null && (matchA.GroupType == groupA || matchA.GroupType.id == groupA.id))
+                    return true;
+
+                ElementGroup matchB = GetWorldElementGroupWithRot(tileA, dirA, rotA, groupB);
+                if (matchB != null && matchB.GroupType != null && (matchB.GroupType == groupB || matchB.GroupType.id == groupB.id))
+                    return true;
+            }
+
+            int rotA_local = (dirA - rotA + 600) % 6;
+            var listA = tileA.GetHybridEdges(rotA_local, Space.Self);
+            int hybridA = listA != null ? listA.Count : 0;
+
+            if ((hybridA > 0 && groupB == null) || (GetWorldHybridEdgeCount(tileB, dirB) > 0 && groupA == null))
             {
                 return true;
             }
@@ -274,13 +210,8 @@ namespace PerfectTriggerSlot
                 var method = typeof(GridCalculator).GetMethod("GetNeighborIndexFromGridPos", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance);
                 if (method != null)
                 {
-                    object instance = null;
-                    object res = method.Invoke(instance, new object[] { toPos, fromPos });
-                    if (res != null)
-                    {
-                        int? idx = (int?)res;
-                        if (idx.HasValue) return idx.Value;
-                    }
+                    object res = method.Invoke(null, new object[] { toPos, fromPos });
+                    if (res != null && ((int?)res).HasValue) return ((int?)res).Value;
                 }
             }
             catch {}
@@ -288,10 +219,9 @@ namespace PerfectTriggerSlot
             return (defaultDir + 3) % 6;
         }
 
-        private static bool IsTileWaitingFor6thPerfect(Tile centerTile, World world, out int emptyNeighborDir)
+        private static MatchStatus GetTileMatchStatus(Tile centerTile, World world)
         {
-            emptyNeighborDir = -1;
-            if (centerTile == null || world == null) return false;
+            if (centerTile == null || world == null) return MatchStatus.None;
 
             Vector2Int[] neighborPositions = GetNeighborPositions(centerTile.GridPos);
             int filledCount = 0;
@@ -311,14 +241,76 @@ namespace PerfectTriggerSlot
                     }
                     filledCount++;
                 }
-                else
-                {
-                    emptyNeighborDir = i;
-                }
             }
 
-            return filledCount == 5 && allFilledMatched;
+            if (allFilledMatched)
+            {
+                if (filledCount == 5) return MatchStatus.FiveMatch; // Cần 5 ô -> Vàng
+                if (filledCount == 4) return MatchStatus.FourMatch; // Cần 4 ô -> Đỏ
+            }
+
+            return MatchStatus.None;
         }
+
+        // =========================================================================
+        // 3. LOGIC KIỂM TRA Ô TRỐNG (TILE SLOT) CHO TILE ĐANG CẦM (MÀU TÍM)
+        // =========================================================================
+
+        private static Tile GetCurrentHeldTile()
+        {
+            if (OverwritingSingleton<IngameUi>.Instance != null && OverwritingSingleton<IngameUi>.Instance.tilePlacer != null)
+            {
+                return OverwritingSingleton<IngameUi>.Instance.tilePlacer.CurrentTile;
+            }
+            return null;
+        }
+
+        private static bool CanTileFitCleanlyInSlot(TileSlot slot, Tile heldTile, World world)
+        {
+            if (slot == null || heldTile == null || world == null) return false;
+            if (!slot.IsValid) return false;
+
+            Vector2Int slotPos = slot.GridPos;
+            Vector2Int[] neighborPositions = GetNeighborPositions(slotPos);
+
+            int filledNeighbors = 0;
+            for (int i = 0; i < 6; i++)
+            {
+                if (world.GetTile(neighborPositions[i]) != null)
+                    filledNeighbors++;
+            }
+
+            if (filledNeighbors == 0) return false;
+
+            for (int rot = 0; rot < 6; rot++)
+            {
+                bool allMatched = true;
+
+                for (int i = 0; i < 6; i++)
+                {
+                    Tile neighbor = world.GetTile(neighborPositions[i]);
+                    if (neighbor != null)
+                    {
+                        int oppositeDir = GetOppositeNeighborDir(slotPos, neighbor.GridPos, i);
+                        bool match = CheckEdgeMatchWithRot(heldTile, rot, i, neighbor, oppositeDir);
+
+                        if (!match)
+                        {
+                            allMatched = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (allMatched) return true;
+            }
+
+            return false;
+        }
+
+        // =========================================================================
+        // 4. CẬP NHẬT HIGHLIGHT & MARKERS (ĐƯỜNG KÍNH = 1/2 CŨ)
+        // =========================================================================
 
         private static void SetTileMeshHighlight(Tile tile, bool highlight)
         {
@@ -327,22 +319,18 @@ namespace PerfectTriggerSlot
             foreach (Renderer r in renderers)
             {
                 if (r == null || r.material == null) continue;
-                if (highlight)
+                if (r.material.HasProperty("_Highlight"))
                 {
-                    if (r.material.HasProperty("_Highlight")) r.material.SetFloat("_Highlight", 1.0f);
-                }
-                else
-                {
-                    if (r.material.HasProperty("_Highlight")) r.material.SetFloat("_Highlight", 0.0f);
+                    r.material.SetFloat("_Highlight", highlight ? 1.0f : 0.0f);
                 }
             }
         }
 
-        private static void UpdateTileHighlights(HashSet<Tile> activeTriggers)
+        private static void UpdateTileMarkers(Dictionary<Tile, MatchStatus> tileStatuses)
         {
             foreach (Tile tile in currentlyHighlightedTiles)
             {
-                if (!activeTriggers.Contains(tile))
+                if (!tileStatuses.ContainsKey(tile))
                 {
                     SetTileMeshHighlight(tile, false);
                 }
@@ -350,44 +338,192 @@ namespace PerfectTriggerSlot
             currentlyHighlightedTiles.Clear();
 
             List<Tile> toRemove = new List<Tile>();
-            foreach (var kvp in activeMarkers)
+            foreach (var kvp in activeTileMarkers)
             {
-                if (!activeTriggers.Contains(kvp.Key) || kvp.Key == null)
+                if (kvp.Key == null || !tileStatuses.ContainsKey(kvp.Key))
                 {
                     if (kvp.Value != null) Object.Destroy(kvp.Value);
                     toRemove.Add(kvp.Key);
                 }
             }
-            foreach (Tile t in toRemove) activeMarkers.Remove(t);
+            foreach (Tile t in toRemove) activeTileMarkers.Remove(t);
 
-            foreach (Tile tile in activeTriggers)
+            foreach (var kvp in tileStatuses)
             {
-                if (tile == null) continue;
+                Tile tile = kvp.Key;
+                MatchStatus status = kvp.Value;
+
+                Color targetColor = (status == MatchStatus.FiveMatch)
+                    ? new Color(1.0f, 0.9f, 0.0f, 0.85f)  // VÀNG (5/5 Match)
+                    : new Color(1.0f, 0.1f, 0.1f, 0.85f); // ĐỎ (4/4 Match)
+
                 currentlyHighlightedTiles.Add(tile);
                 SetTileMeshHighlight(tile, true);
 
-                if (!activeMarkers.ContainsKey(tile) || activeMarkers[tile] == null)
+                if (!activeTileMarkers.ContainsKey(tile) || activeTileMarkers[tile] == null)
                 {
-                    GameObject marker = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
-                    marker.name = "PerfectTargetTileMarker";
-
-                    Collider col = marker.GetComponent<Collider>();
-                    if (col != null) Object.Destroy(col);
-
-                    Renderer r = marker.GetComponent<Renderer>();
-                    if (r != null)
+                    // KÍCH THƯỚC MỚI: Đường kính X, Z = 0.35f (giảm 1/2 so với 0.7f cũ -> Diện tích = 1/4)
+                    GameObject marker = CreateMarkerObject("TileMatchMarker", tile.transform.position + new Vector3(0f, 0.35f, 0f), targetColor, new Vector3(0.35f, 0.05f, 0.35f));
+                    activeTileMarkers[tile] = marker;
+                }
+                else
+                {
+                    Renderer r = activeTileMarkers[tile].GetComponent<Renderer>();
+                    if (r != null && r.material != null)
                     {
-                        Material mat = new Material(Shader.Find("Sprites/Default"));
-                        mat.color = new Color(0.0f, 1.0f, 0.2f, 0.85f);
-                        r.material = mat;
+                        r.material.color = targetColor;
                     }
-
-                    marker.transform.position = tile.transform.position + new Vector3(0f, 0.35f, 0f);
-                    marker.transform.localScale = new Vector3(0.7f, 0.08f, 0.7f);
-                    activeMarkers[tile] = marker;
                 }
             }
         }
+
+        private static void UpdateSlotMarkers(HashSet<TileSlot> cleanSlots)
+        {
+            List<TileSlot> toRemove = new List<TileSlot>();
+            foreach (var kvp in activeSlotMarkers)
+            {
+                if (kvp.Key == null || !cleanSlots.Contains(kvp.Key))
+                {
+                    if (kvp.Value != null) Object.Destroy(kvp.Value);
+                    toRemove.Add(kvp.Key);
+                }
+            }
+            foreach (TileSlot s in toRemove) activeSlotMarkers.Remove(s);
+
+            Color purpleColor = new Color(0.75f, 0.15f, 0.95f, 0.85f); // TÍM (Clean Slot)
+
+            foreach (TileSlot slot in cleanSlots)
+            {
+                if (slot == null) continue;
+
+                if (!activeSlotMarkers.ContainsKey(slot) || activeSlotMarkers[slot] == null)
+                {
+                    // KÍCH THƯỚC MỚI: Đường kính X, Z = 0.325f (giảm 1/2 so với 0.65f cũ -> Diện tích = 1/4)
+                    GameObject marker = CreateMarkerObject("CleanSlotMarker", slot.transform.position + new Vector3(0f, 0.25f, 0f), purpleColor, new Vector3(0.325f, 0.04f, 0.325f));
+                    activeSlotMarkers[slot] = marker;
+                }
+            }
+        }
+
+        // =========================================================================
+        // 5. ĐƯỜNG TRÒN XANH DƯƠNG DYNAMIC (BOUNDING CIRCLE)
+        // =========================================================================
+
+        private static void InitRadiusCircle()
+        {
+            if (radiusCircleObject != null) return;
+
+            radiusCircleObject = new GameObject("MaxRadiusCircleVisualizer");
+            circleMeshFilter = radiusCircleObject.AddComponent<MeshFilter>();
+            circleMeshRenderer = radiusCircleObject.AddComponent<MeshRenderer>();
+
+            Material mat = new Material(Shader.Find("Sprites/Default"));
+            mat.color = new Color(0.1f, 0.5f, 1.0f, 0.35f);
+
+            mat.SetFloat("_Mode", 2);
+            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            mat.SetInt("_ZWrite", 0);
+            mat.DisableKeyword("_ALPHATEST_ON");
+            mat.EnableKeyword("_ALPHABLEND_ON");
+            mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            mat.renderQueue = 3000;
+
+            circleMeshRenderer.material = mat;
+        }
+
+        private static void UpdateMaxRadiusCircle(List<Tile> allPlacedTiles)
+        {
+            InitRadiusCircle();
+
+            if (allPlacedTiles == null || allPlacedTiles.Count == 0)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            Vector3 centerSum = Vector3.zero;
+            int validCount = 0;
+
+            foreach (Tile tile in allPlacedTiles)
+            {
+                if (tile == null) continue;
+                Vector3 pos = tile.transform.position;
+                centerSum += new Vector3(pos.x, 0f, pos.z);
+                validCount++;
+            }
+
+            if (validCount == 0)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            Vector3 dynamicCenter = centerSum / validCount;
+
+            float maxRadius = 0f;
+            foreach (Tile tile in allPlacedTiles)
+            {
+                if (tile == null) continue;
+                Vector3 tilePos = tile.transform.position;
+                Vector3 posFlat = new Vector3(tilePos.x, 0f, tilePos.z);
+
+                float dist = Vector3.Distance(dynamicCenter, posFlat);
+                if (dist > maxRadius)
+                {
+                    maxRadius = dist;
+                }
+            }
+
+            if (maxRadius <= 0.01f)
+            {
+                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
+                return;
+            }
+
+            radiusCircleObject.SetActive(true);
+
+            int segments = 120;
+            float thickness = 0.2f;
+            float innerRadius = maxRadius - (thickness / 2f);
+            float outerRadius = maxRadius + (thickness / 2f);
+
+            Mesh ringMesh = new Mesh();
+            Vector3[] vertices = new Vector3[segments * 2];
+            int[] triangles = new int[segments * 6];
+
+            const float TWO_PI = 6.28318530718f;
+            float heightY = 0.12f;
+
+            for (int i = 0; i < segments; i++)
+            {
+                float angle = (float)i / segments * TWO_PI;
+                float cos = Mathf.Cos(angle);
+                float sin = Mathf.Sin(angle);
+
+                vertices[i * 2] = new Vector3(dynamicCenter.x + cos * innerRadius, heightY, dynamicCenter.z + sin * innerRadius);
+                vertices[i * 2 + 1] = new Vector3(dynamicCenter.x + cos * outerRadius, heightY, dynamicCenter.z + sin * outerRadius);
+
+                int nextIndex = (i + 1) % segments;
+                triangles[i * 6] = i * 2;
+                triangles[i * 6 + 1] = i * 2 + 1;
+                triangles[i * 6 + 2] = nextIndex * 2;
+
+                triangles[i * 6 + 3] = nextIndex * 2;
+                triangles[i * 6 + 4] = i * 2 + 1;
+                triangles[i * 6 + 5] = nextIndex * 2 + 1;
+            }
+
+            ringMesh.vertices = vertices;
+            ringMesh.triangles = triangles;
+            ringMesh.RecalculateNormals();
+
+            circleMeshFilter.mesh = ringMesh;
+        }
+
+        // =========================================================================
+        // 6. QUÉT VÀ THỰC THI (MAIN SCAN)
+        // =========================================================================
 
         public static void RunHighlightScan()
         {
@@ -397,35 +533,75 @@ namespace PerfectTriggerSlot
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
-            // 1. Cập nhật đường tròn màu xanh dương với tâm động (Dynamic Center & Blue Circle)
+            // 1. Cập nhật đường tròn xanh dương
             UpdateMaxRadiusCircle(allPlacedTiles);
 
-            // 2. Quét Highlight các vị trí 5/5 matched
-            HashSet<Tile> activeTriggers = new HashSet<Tile>();
-
+            // 2. Quét ô Đỏ (4/4 Match) và Vàng (5/5 Match)
+            Dictionary<Tile, MatchStatus> tileStatuses = new Dictionary<Tile, MatchStatus>();
             foreach (Tile centerTile in allPlacedTiles)
             {
                 if (centerTile == null) continue;
-
-                if (IsTileWaitingFor6thPerfect(centerTile, world, out int emptyDir))
+                MatchStatus status = GetTileMatchStatus(centerTile, world);
+                if (status != MatchStatus.None)
                 {
-                    activeTriggers.Add(centerTile);
+                    tileStatuses[centerTile] = status;
                 }
             }
+            UpdateTileMarkers(tileStatuses);
 
-            UpdateTileHighlights(activeTriggers);
+            // 3. Quét ô Tím (Slot đặt Tile hiện tại không bị lệch cạnh)
+            HashSet<TileSlot> cleanSlots = new HashSet<TileSlot>();
+            Tile heldTile = GetCurrentHeldTile();
+
+            if (heldTile != null)
+            {
+                TileSlotPreviewer slotPreviewer = Object.FindObjectOfType<TileSlotPreviewer>();
+                if (slotPreviewer != null)
+                {
+                    List<TileSlot> validSlots = slotPreviewer.AllValidTileSlots;
+                    if (validSlots != null)
+                    {
+                        foreach (TileSlot slot in validSlots)
+                        {
+                            if (CanTileFitCleanlyInSlot(slot, heldTile, world))
+                            {
+                                cleanSlots.Add(slot);
+                            }
+                        }
+                    }
+                }
+            }
+            UpdateSlotMarkers(cleanSlots);
         }
+
+        // =========================================================================
+        // 7. HARMONY PATCHES
+        // =========================================================================
 
         [HarmonyPatch(typeof(TileSlotPreviewer), "UpdateTileSlotValidity")]
         [HarmonyPostfix]
-        private static void Postfix_UpdateTileSlotValidity(Tile newTile, ref Dictionary<Vector2Int, TileSlot> ___tileSlots)
+        private static void Postfix_UpdateTileSlotValidity()
         {
             RunHighlightScan();
         }
 
         [HarmonyPatch(typeof(Dorfromantik.TilePlacementEventBroadcaster), "BroadcastTilePlacedFinalized")]
         [HarmonyPostfix]
-        private static void Postfix_BroadcastTilePlacedFinalized(Tile placedTile, bool placedByPlayer)
+        private static void Postfix_BroadcastTilePlacedFinalized()
+        {
+            RunHighlightScan();
+        }
+
+        [HarmonyPatch(typeof(TilePlacer), "RotatePreviewTile", new System.Type[] { typeof(int), typeof(bool) })]
+        [HarmonyPostfix]
+        private static void Postfix_RotatePreviewTile()
+        {
+            RunHighlightScan();
+        }
+
+        [HarmonyPatch(typeof(TilePlacer), "ShowPreviewTileAt")]
+        [HarmonyPostfix]
+        private static void Postfix_ShowPreviewTileAt()
         {
             RunHighlightScan();
         }
