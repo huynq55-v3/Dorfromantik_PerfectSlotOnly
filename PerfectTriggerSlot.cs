@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using BepInEx;
 using HarmonyLib;
@@ -10,8 +11,8 @@ namespace PerfectTriggerSlot
     public class PerfectTriggerSlotBase : BaseUnityPlugin
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
-        private const string modName = "Perfect Trigger Slot Highlighter & Dynamic Radius Circle";
-        private const string modVersion = "6.2.0";
+        private const string modName = "Perfect Trigger Slot Highlighter";
+        private const string modVersion = "10.0.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
@@ -21,23 +22,95 @@ namespace PerfectTriggerSlot
 
         private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
 
-        private static GameObject radiusCircleObject;
-        private static MeshFilter circleMeshFilter;
-        private static MeshRenderer circleMeshRenderer;
-
         private enum MatchStatus { None, FourMatch, FiveMatch, SixMatch }
+
+        public struct SlotState : IComparable<SlotState>
+        {
+            public int match;
+            public int total;
+
+            public SlotState(int match, int total)
+            {
+                this.match = match;
+                this.total = total;
+            }
+
+            public int CompareTo(SlotState other)
+            {
+                if (this.match != other.match)
+                {
+                    return this.match.CompareTo(other.match);
+                }
+
+                int penaltyA = this.total - this.match;
+                int penaltyB = other.total - other.match;
+                if (penaltyA != penaltyB)
+                {
+                    return penaltyB.CompareTo(penaltyA);
+                }
+
+                return this.total.CompareTo(other.total);
+            }
+        }
+
+        // Dictionary to map each (Match, Total) state to a unique fixed random color
+        private static readonly Dictionary<KeyValuePair<int, int>, Color> slotColorMap = new Dictionary<KeyValuePair<int, int>, Color>();
 
         private void Awake()
         {
             Log = Logger;
+            Initialize27DistinctRandomColors();
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
             Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} ACTIVE!");
-            Log.LogWarning(" - Green Marker: 6/6 Matched Edges (Perfect)");
-            Log.LogWarning(" - Yellow Marker: 5/5 Matched Edges");
-            Log.LogWarning(" - Red Marker: 4/4 Matched Edges");
-            Log.LogWarning(" - Purple Marker: Clean Slot for Current Tile");
+            Log.LogWarning(" - Placed Tiles: Red (4/4), Yellow (5/5), Green (6/6)");
+            Log.LogWarning(" - Unplaced Slots: 27 Unique High-Contrast Deterministic Colors");
             Log.LogWarning("=================================================");
+        }
+
+        private static void Initialize27DistinctRandomColors()
+        {
+            List<SlotState> allStates = new List<SlotState>();
+            for (int t = 1; t <= 6; t++)
+            {
+                for (int m = 0; m <= t; m++)
+                {
+                    allStates.Add(new SlotState(m, t));
+                }
+            }
+
+            // Shuffle states with a deterministic seed for consistent mapping across game sessions
+            System.Random rng = new System.Random(1337);
+            
+            // Using Golden Ratio to space hues evenly for maximum visual contrast
+            const float goldenRatioConjugate = 0.618033988749895f;
+            float hue = (float)rng.NextDouble();
+
+            slotColorMap.Clear();
+            for (int i = 0; i < allStates.Count; i++)
+            {
+                var key = new KeyValuePair<int, int>(allStates[i].match, allStates[i].total);
+
+                hue = (hue + goldenRatioConjugate) % 1.0f;
+                // High saturation & brightness so the cylinder markers pop against the terrain
+                float saturation = 0.75f + (float)(rng.NextDouble() * 0.25f);
+                float value = 0.85f + (float)(rng.NextDouble() * 0.15f);
+
+                Color color = Color.HSVToRGB(hue, saturation, value);
+                color.a = 0.85f; // High visibility opacity
+
+                slotColorMap[key] = color;
+            }
+        }
+
+        private static Color GetSlotColor(int match, int total)
+        {
+            var key = new KeyValuePair<int, int>(match, total);
+            if (slotColorMap.TryGetValue(key, out Color color))
+            {
+                return color;
+            }
+            return new Color(0.5f, 0.5f, 0.5f, 0.5f);
         }
 
         private static GameObject CreateMarkerObject(string name, Vector3 pos, Color color, Vector3 scale)
@@ -46,7 +119,7 @@ namespace PerfectTriggerSlot
             marker.name = name;
 
             Collider col = marker.GetComponent<Collider>();
-            if (col != null) Object.Destroy(col);
+            if (col != null) UnityEngine.Object.Destroy(col);
 
             Renderer r = marker.GetComponent<Renderer>();
             if (r != null)
@@ -235,9 +308,9 @@ namespace PerfectTriggerSlot
 
             if (allFilledMatched)
             {
-                if (filledCount == 6) return MatchStatus.SixMatch;  // 6/6 -> XANH LÁ CÂY
-                if (filledCount == 5) return MatchStatus.FiveMatch; // 5/5 -> VÀNG
-                if (filledCount == 4) return MatchStatus.FourMatch; // 4/4 -> ĐỎ
+                if (filledCount == 6) return MatchStatus.SixMatch;  // 6/6
+                if (filledCount == 5) return MatchStatus.FiveMatch; // 5/5
+                if (filledCount == 4) return MatchStatus.FourMatch; // 4/4
             }
 
             return MatchStatus.None;
@@ -252,10 +325,10 @@ namespace PerfectTriggerSlot
             return null;
         }
 
-        private static bool CanTileFitCleanlyInSlot(TileSlot slot, Tile heldTile, World world)
+        private static bool CalculateSlotMaxState(TileSlot slot, Tile heldTile, World world, out SlotState bestState)
         {
-            if (slot == null || heldTile == null || world == null) return false;
-            if (!slot.IsValid) return false;
+            bestState = new SlotState(0, 1);
+            if (slot == null || heldTile == null || world == null || !slot.IsValid) return false;
 
             Vector2Int slotPos = slot.GridPos;
             Vector2Int[] neighborPositions = GetNeighborPositions(slotPos);
@@ -269,9 +342,11 @@ namespace PerfectTriggerSlot
 
             if (filledNeighbors == 0) return false;
 
+            int maxMatch = -1;
+
             for (int rot = 0; rot < 6; rot++)
             {
-                bool allMatched = true;
+                int matchCount = 0;
 
                 for (int i = 0; i < 6; i++)
                 {
@@ -279,20 +354,21 @@ namespace PerfectTriggerSlot
                     if (neighbor != null)
                     {
                         int oppositeDir = GetOppositeNeighborDir(slotPos, neighbor.GridPos, i);
-                        bool match = CheckEdgeMatchWithRot(heldTile, rot, i, neighbor, oppositeDir);
-
-                        if (!match)
+                        if (CheckEdgeMatchWithRot(heldTile, rot, i, neighbor, oppositeDir))
                         {
-                            allMatched = false;
-                            break;
+                            matchCount++;
                         }
                     }
                 }
 
-                if (allMatched) return true;
+                if (matchCount > maxMatch)
+                {
+                    maxMatch = matchCount;
+                }
             }
 
-            return false;
+            bestState = new SlotState(maxMatch, filledNeighbors);
+            return true;
         }
 
         private static void SetTileMeshHighlight(Tile tile, bool highlight)
@@ -325,7 +401,7 @@ namespace PerfectTriggerSlot
             {
                 if (kvp.Key == null || !tileStatuses.ContainsKey(kvp.Key))
                 {
-                    if (kvp.Value != null) Object.Destroy(kvp.Value);
+                    if (kvp.Value != null) UnityEngine.Object.Destroy(kvp.Value);
                     toRemove.Add(kvp.Key);
                 }
             }
@@ -339,15 +415,15 @@ namespace PerfectTriggerSlot
                 Color targetColor;
                 if (status == MatchStatus.SixMatch)
                 {
-                    targetColor = new Color(0.0f, 1.0f, 0.2f, 0.85f);  // XANH LÁ CÂY (6/6)
+                    targetColor = new Color(0.0f, 1.0f, 0.2f, 0.85f);  // LIME GREEN (6/6 Placed)
                 }
                 else if (status == MatchStatus.FiveMatch)
                 {
-                    targetColor = new Color(1.0f, 0.9f, 0.0f, 0.85f);  // VÀNG (5/5)
+                    targetColor = new Color(1.0f, 0.9f, 0.0f, 0.85f);  // YELLOW (5/5 Placed)
                 }
                 else
                 {
-                    targetColor = new Color(1.0f, 0.1f, 0.1f, 0.85f);  // ĐỎ (4/4)
+                    targetColor = new Color(1.0f, 0.1f, 0.1f, 0.85f);  // RED (4/4 Placed)
                 }
 
                 currentlyHighlightedTiles.Add(tile);
@@ -369,157 +445,51 @@ namespace PerfectTriggerSlot
             }
         }
 
-        private static void UpdateSlotMarkers(HashSet<TileSlot> cleanSlots)
+        private static void UpdateSlotMarkers(Dictionary<TileSlot, SlotState> slotStates)
         {
             List<TileSlot> toRemove = new List<TileSlot>();
             foreach (var kvp in activeSlotMarkers)
             {
-                if (kvp.Key == null || !cleanSlots.Contains(kvp.Key))
+                if (kvp.Key == null || !slotStates.ContainsKey(kvp.Key))
                 {
-                    if (kvp.Value != null) Object.Destroy(kvp.Value);
+                    if (kvp.Value != null) UnityEngine.Object.Destroy(kvp.Value);
                     toRemove.Add(kvp.Key);
                 }
             }
             foreach (TileSlot s in toRemove) activeSlotMarkers.Remove(s);
 
-            Color purpleColor = new Color(0.75f, 0.15f, 0.95f, 0.85f); // TÍM
-
-            foreach (TileSlot slot in cleanSlots)
+            foreach (var kvp in slotStates)
             {
+                TileSlot slot = kvp.Key;
+                SlotState state = kvp.Value;
                 if (slot == null) continue;
+
+                Color targetColor = GetSlotColor(state.match, state.total);
 
                 if (!activeSlotMarkers.ContainsKey(slot) || activeSlotMarkers[slot] == null)
                 {
-                    GameObject marker = CreateMarkerObject("CleanSlotMarker", slot.transform.position + new Vector3(0f, 0.25f, 0f), purpleColor, new Vector3(0.325f, 0.04f, 0.325f));
+                    GameObject marker = CreateMarkerObject("SlotStateMarker", slot.transform.position + new Vector3(0f, 0.25f, 0f), targetColor, new Vector3(0.325f, 0.04f, 0.325f));
                     activeSlotMarkers[slot] = marker;
                 }
-            }
-        }
-
-        private static void InitRadiusCircle()
-        {
-            if (radiusCircleObject != null) return;
-
-            radiusCircleObject = new GameObject("MaxRadiusCircleVisualizer");
-            circleMeshFilter = radiusCircleObject.AddComponent<MeshFilter>();
-            circleMeshRenderer = radiusCircleObject.AddComponent<MeshRenderer>();
-
-            Material mat = new Material(Shader.Find("Sprites/Default"));
-            mat.color = new Color(0.1f, 0.5f, 1.0f, 0.35f);
-
-            mat.SetFloat("_Mode", 2);
-            mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
-            mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
-            mat.SetInt("_ZWrite", 0);
-            mat.DisableKeyword("_ALPHATEST_ON");
-            mat.EnableKeyword("_ALPHABLEND_ON");
-            mat.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-            mat.renderQueue = 3000;
-
-            circleMeshRenderer.material = mat;
-        }
-
-        private static void UpdateMaxRadiusCircle(List<Tile> allPlacedTiles)
-        {
-            InitRadiusCircle();
-
-            if (allPlacedTiles == null || allPlacedTiles.Count == 0)
-            {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
-            }
-
-            Vector3 centerSum = Vector3.zero;
-            int validCount = 0;
-
-            foreach (Tile tile in allPlacedTiles)
-            {
-                if (tile == null) continue;
-                Vector3 pos = tile.transform.position;
-                centerSum += new Vector3(pos.x, 0f, pos.z);
-                validCount++;
-            }
-
-            if (validCount == 0)
-            {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
-            }
-
-            Vector3 dynamicCenter = centerSum / validCount;
-
-            float maxRadius = 0f;
-            foreach (Tile tile in allPlacedTiles)
-            {
-                if (tile == null) continue;
-                Vector3 tilePos = tile.transform.position;
-                Vector3 posFlat = new Vector3(tilePos.x, 0f, tilePos.z);
-
-                float dist = Vector3.Distance(dynamicCenter, posFlat);
-                if (dist > maxRadius)
+                else
                 {
-                    maxRadius = dist;
+                    Renderer r = activeSlotMarkers[slot].GetComponent<Renderer>();
+                    if (r != null && r.material != null)
+                    {
+                        r.material.color = targetColor;
+                    }
                 }
             }
-
-            if (maxRadius <= 0.01f)
-            {
-                if (radiusCircleObject != null) radiusCircleObject.SetActive(false);
-                return;
-            }
-
-            radiusCircleObject.SetActive(true);
-
-            int segments = 120;
-            float thickness = 0.2f;
-            float innerRadius = maxRadius - (thickness / 2f);
-            float outerRadius = maxRadius + (thickness / 2f);
-
-            Mesh ringMesh = new Mesh();
-            Vector3[] vertices = new Vector3[segments * 2];
-            int[] triangles = new int[segments * 6];
-
-            const float TWO_PI = 6.28318530718f;
-            float heightY = 0.12f;
-
-            for (int i = 0; i < segments; i++)
-            {
-                float angle = (float)i / segments * TWO_PI;
-                float cos = Mathf.Cos(angle);
-                float sin = Mathf.Sin(angle);
-
-                vertices[i * 2] = new Vector3(dynamicCenter.x + cos * innerRadius, heightY, dynamicCenter.z + sin * innerRadius);
-                vertices[i * 2 + 1] = new Vector3(dynamicCenter.x + cos * outerRadius, heightY, dynamicCenter.z + sin * outerRadius);
-
-                int nextIndex = (i + 1) % segments;
-                triangles[i * 6] = i * 2;
-                triangles[i * 6 + 1] = i * 2 + 1;
-                triangles[i * 6 + 2] = nextIndex * 2;
-
-                triangles[i * 6 + 3] = nextIndex * 2;
-                triangles[i * 6 + 4] = i * 2 + 1;
-                triangles[i * 6 + 5] = nextIndex * 2 + 1;
-            }
-
-            ringMesh.vertices = vertices;
-            ringMesh.triangles = triangles;
-            ringMesh.RecalculateNormals();
-
-            circleMeshFilter.mesh = ringMesh;
         }
 
-        public static void RunHighlightScan()
+        public static void ScanPlacedTilesOnly()
         {
-            World world = Object.FindObjectOfType<World>();
+            World world = UnityEngine.Object.FindObjectOfType<World>();
             if (world == null) return;
 
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
-            // 1. Cập nhật đường tròn
-            UpdateMaxRadiusCircle(allPlacedTiles);
-
-            // 2. Quét ô Đỏ (4/4), Vàng (5/5) và Xanh lá (6/6)
             Dictionary<Tile, MatchStatus> tileStatuses = new Dictionary<Tile, MatchStatus>();
             foreach (Tile centerTile in allPlacedTiles)
             {
@@ -531,14 +501,19 @@ namespace PerfectTriggerSlot
                 }
             }
             UpdateTileMarkers(tileStatuses);
+        }
 
-            // 3. Quét ô Tím (Slot đặt Tile hiện tại không bị lệch)
-            HashSet<TileSlot> cleanSlots = new HashSet<TileSlot>();
+        public static void ScanSlotsOnly()
+        {
+            World world = UnityEngine.Object.FindObjectOfType<World>();
+            if (world == null) return;
+
+            Dictionary<TileSlot, SlotState> slotStates = new Dictionary<TileSlot, SlotState>();
             Tile heldTile = GetCurrentHeldTile();
 
             if (heldTile != null)
             {
-                TileSlotPreviewer slotPreviewer = Object.FindObjectOfType<TileSlotPreviewer>();
+                TileSlotPreviewer slotPreviewer = UnityEngine.Object.FindObjectOfType<TileSlotPreviewer>();
                 if (slotPreviewer != null)
                 {
                     List<TileSlot> validSlots = slotPreviewer.AllValidTileSlots;
@@ -546,43 +521,49 @@ namespace PerfectTriggerSlot
                     {
                         foreach (TileSlot slot in validSlots)
                         {
-                            if (CanTileFitCleanlyInSlot(slot, heldTile, world))
+                            if (CalculateSlotMaxState(slot, heldTile, world, out SlotState state))
                             {
-                                cleanSlots.Add(slot);
+                                slotStates[slot] = state;
                             }
                         }
                     }
                 }
             }
-            UpdateSlotMarkers(cleanSlots);
+            UpdateSlotMarkers(slotStates);
+        }
+
+        public static void RunFullScan()
+        {
+            ScanPlacedTilesOnly();
+            ScanSlotsOnly();
         }
 
         [HarmonyPatch(typeof(TileSlotPreviewer), "UpdateTileSlotValidity")]
         [HarmonyPostfix]
         private static void Postfix_UpdateTileSlotValidity()
         {
-            RunHighlightScan();
+            RunFullScan();
         }
 
         [HarmonyPatch(typeof(Dorfromantik.TilePlacementEventBroadcaster), "BroadcastTilePlacedFinalized")]
         [HarmonyPostfix]
         private static void Postfix_BroadcastTilePlacedFinalized()
         {
-            RunHighlightScan();
+            RunFullScan();
         }
 
         [HarmonyPatch(typeof(TilePlacer), "RotatePreviewTile", new System.Type[] { typeof(int), typeof(bool) })]
         [HarmonyPostfix]
         private static void Postfix_RotatePreviewTile()
         {
-            RunHighlightScan();
+            ScanPlacedTilesOnly();
         }
 
         [HarmonyPatch(typeof(TilePlacer), "ShowPreviewTileAt")]
         [HarmonyPostfix]
         private static void Postfix_ShowPreviewTileAt()
         {
-            RunHighlightScan();
+            ScanPlacedTilesOnly();
         }
     }
 }
