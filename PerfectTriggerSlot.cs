@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
@@ -12,17 +13,19 @@ namespace PerfectTriggerSlot
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
         private const string modName = "Perfect Trigger Slot Highlighter";
-        private const string modVersion = "10.0.0";
+        private const string modVersion = "10.1.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
 
         private static readonly Dictionary<Tile, GameObject> activeTileMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
+        private static readonly Dictionary<Tile, GameObject> activeTilePresetTexts = new Dictionary<Tile, GameObject>();
 
         private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
 
-        private enum MatchStatus { None, FourMatch, FiveMatch, SixMatch }
+        // Thêm trạng thái BlackMatch cho các ô đã đặt bị hủy khả năng Perfect
+        private enum MatchStatus { None, BlackMatch, FourMatch, FiveMatch, SixMatch }
 
         public struct SlotState : IComparable<SlotState>
         {
@@ -53,7 +56,6 @@ namespace PerfectTriggerSlot
             }
         }
 
-        // Dictionary to map each (Match, Total) state to a unique fixed random color
         private static readonly Dictionary<KeyValuePair<int, int>, Color> slotColorMap = new Dictionary<KeyValuePair<int, int>, Color>();
 
         private void Awake()
@@ -63,7 +65,7 @@ namespace PerfectTriggerSlot
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
             Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} ACTIVE!");
-            Log.LogWarning(" - Placed Tiles: Red (4/4), Yellow (5/5), Green (6/6)");
+            Log.LogWarning(" - Placed Tiles: Red (4/4), Yellow (5/5), Green (6/6), Black (Imperfect)");
             Log.LogWarning(" - Unplaced Slots: 27 Unique High-Contrast Deterministic Colors");
             Log.LogWarning("=================================================");
         }
@@ -79,10 +81,7 @@ namespace PerfectTriggerSlot
                 }
             }
 
-            // Shuffle states with a deterministic seed for consistent mapping across game sessions
             System.Random rng = new System.Random(1337);
-            
-            // Using Golden Ratio to space hues evenly for maximum visual contrast
             const float goldenRatioConjugate = 0.618033988749895f;
             float hue = (float)rng.NextDouble();
 
@@ -92,12 +91,11 @@ namespace PerfectTriggerSlot
                 var key = new KeyValuePair<int, int>(allStates[i].match, allStates[i].total);
 
                 hue = (hue + goldenRatioConjugate) % 1.0f;
-                // High saturation & brightness so the cylinder markers pop against the terrain
                 float saturation = 0.75f + (float)(rng.NextDouble() * 0.25f);
                 float value = 0.85f + (float)(rng.NextDouble() * 0.15f);
 
                 Color color = Color.HSVToRGB(hue, saturation, value);
-                color.a = 0.85f; // High visibility opacity
+                color.a = 0.85f;
 
                 slotColorMap[key] = color;
             }
@@ -312,6 +310,11 @@ namespace PerfectTriggerSlot
                 if (filledCount == 5) return MatchStatus.FiveMatch; // 5/5
                 if (filledCount == 4) return MatchStatus.FourMatch; // 4/4
             }
+            else if (filledCount > 0)
+            {
+                // Có ít nhất 1 hàng xóm nhưng có cạnh không trùng khớp -> không thể đạt Perfect
+                return MatchStatus.BlackMatch;
+            }
 
             return MatchStatus.None;
         }
@@ -421,9 +424,13 @@ namespace PerfectTriggerSlot
                 {
                     targetColor = new Color(1.0f, 0.9f, 0.0f, 0.85f);  // YELLOW (5/5 Placed)
                 }
-                else
+                else if (status == MatchStatus.FourMatch)
                 {
                     targetColor = new Color(1.0f, 0.1f, 0.1f, 0.85f);  // RED (4/4 Placed)
+                }
+                else
+                {
+                    targetColor = new Color(0.0f, 0.0f, 0.0f, 0.85f);  // BLACK (Cạnh lệch, hỏng Perfect)
                 }
 
                 currentlyHighlightedTiles.Add(tile);
@@ -482,6 +489,162 @@ namespace PerfectTriggerSlot
             }
         }
 
+        private static string GetGroupTypeLetter(GroupType groupType)
+        {
+            if (groupType == null) return "";
+            try
+            {
+                string idStr = groupType.id.ToString();
+                switch (idStr)
+                {
+                    case "Village": return "V";
+                    case "Forest": return "F";
+                    case "Agriculture": return "A";
+                    case "TrainTracks": return "T";
+                    case "Water": return "W";
+                    default:
+                        if (!string.IsNullOrEmpty(groupType.name))
+                            return groupType.name.Substring(0, 1).ToUpper();
+                        return idStr.Length > 0 ? idStr.Substring(0, 1).ToUpper() : "";
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static string GetSegmentShapeCode(SegmentType segmentType)
+        {
+            if (segmentType == null) return "";
+            try
+            {
+                string idName = segmentType.id.ToString();
+                if (!string.IsNullOrEmpty(idName) && idName.StartsWith("SegmentType"))
+                {
+                    string code = idName.Substring("SegmentType".Length);
+                    if (!string.IsNullOrEmpty(code)) return code;
+                }
+
+                string name = segmentType.name ?? "";
+                if (name.Length >= 2)
+                {
+                    string tail = name.Substring(name.Length - 2, 2);
+                    if (char.IsDigit(tail[0]) && char.IsLetter(tail[1]))
+                    {
+                        return tail.ToUpper();
+                    }
+                }
+
+                int count = segmentType.edges != null ? segmentType.edges.Count : 0;
+                if (count > 0) return count.ToString() + "A";
+            }
+            catch {}
+            return "";
+        }
+
+        private static string GetTilePresetString(Tile tile)
+        {
+            if (tile == null || tile.AllElementGroupSegments == null || tile.AllElementGroupSegments.Count == 0)
+            {
+                return "";
+            }
+
+            try
+            {
+                List<string> parts = new List<string>();
+                var validSegments = tile.AllElementGroupSegments
+                    .Where(s => s != null && s.SegmentType != null && s.GroupType != null)
+                    .OrderByDescending(s => s.SegmentType.edges != null ? s.SegmentType.edges.Count : 0)
+                    .ThenBy(s => GetGroupTypeLetter(s.GroupType));
+
+                foreach (var seg in validSegments)
+                {
+                    string shapeCode = GetSegmentShapeCode(seg.SegmentType);
+                    string typeLetter = GetGroupTypeLetter(seg.GroupType);
+                    if (!string.IsNullOrEmpty(shapeCode) && !string.IsNullOrEmpty(typeLetter))
+                    {
+                        parts.Add(shapeCode + typeLetter);
+                    }
+                }
+
+                return parts.Count > 0 ? string.Join(" ", parts) : "";
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private static void CreateOrUpdatePresetText(Tile tile)
+        {
+            if (tile == null) return;
+            string presetTextStr = GetTilePresetString(tile);
+            if (string.IsNullOrEmpty(presetTextStr))
+            {
+                if (activeTilePresetTexts.TryGetValue(tile, out GameObject oldObj))
+                {
+                    if (oldObj != null) UnityEngine.Object.Destroy(oldObj);
+                    activeTilePresetTexts.Remove(tile);
+                }
+                return;
+            }
+
+            Vector3 textPos = tile.transform.position + new Vector3(0f, 0.42f, 0f);
+
+            if (!activeTilePresetTexts.TryGetValue(tile, out GameObject textObj) || textObj == null)
+            {
+                textObj = DynamicTextHelper.CreateTextObject("TilePresetText", textPos, presetTextStr);
+                activeTilePresetTexts[tile] = textObj;
+            }
+            else
+            {
+                DynamicTextHelper.UpdateTextObject(textObj, textPos, presetTextStr);
+            }
+        }
+
+        private static void UpdateAllTilePresetTexts(List<Tile> allPlacedTiles)
+        {
+            HashSet<Tile> activeTiles = new HashSet<Tile>();
+            if (allPlacedTiles != null)
+            {
+                foreach (Tile t in allPlacedTiles)
+                {
+                    if (t != null) activeTiles.Add(t);
+                }
+            }
+            Tile heldTile = GetCurrentHeldTile();
+            if (heldTile != null)
+            {
+                activeTiles.Add(heldTile);
+            }
+
+            List<Tile> toRemove = new List<Tile>();
+            foreach (var kvp in activeTilePresetTexts)
+            {
+                if (kvp.Key == null || !activeTiles.Contains(kvp.Key))
+                {
+                    if (kvp.Value != null) UnityEngine.Object.Destroy(kvp.Value);
+                    toRemove.Add(kvp.Key);
+                }
+            }
+            foreach (Tile t in toRemove) activeTilePresetTexts.Remove(t);
+
+            foreach (Tile tile in activeTiles)
+            {
+                CreateOrUpdatePresetText(tile);
+            }
+        }
+
+        private void LateUpdate()
+        {
+            Tile heldTile = GetCurrentHeldTile();
+            if (heldTile != null)
+            {
+                CreateOrUpdatePresetText(heldTile);
+            }
+        }
+
         public static void ScanPlacedTilesOnly()
         {
             World world = UnityEngine.Object.FindObjectOfType<World>();
@@ -501,6 +664,7 @@ namespace PerfectTriggerSlot
                 }
             }
             UpdateTileMarkers(tileStatuses);
+            UpdateAllTilePresetTexts(allPlacedTiles);
         }
 
         public static void ScanSlotsOnly()
@@ -564,6 +728,112 @@ namespace PerfectTriggerSlot
         private static void Postfix_ShowPreviewTileAt()
         {
             ScanPlacedTilesOnly();
+        }
+    }
+
+    internal static class DynamicTextHelper
+    {
+        private static Type tmpType;
+        private static Type textMeshType;
+        private static bool searched = false;
+
+        private static void InitTypes()
+        {
+            if (searched) return;
+            searched = true;
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (tmpType == null) tmpType = asm.GetType("TMPro.TextMeshPro");
+                if (textMeshType == null) textMeshType = asm.GetType("UnityEngine.TextMesh");
+            }
+        }
+
+        public static GameObject CreateTextObject(string name, Vector3 pos, string textString)
+        {
+            InitTypes();
+            GameObject textObj = new GameObject(name);
+            textObj.transform.position = pos;
+            textObj.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+
+            AddTextComp(textObj, textString, Color.white);
+            return textObj;
+        }
+
+        public static void UpdateTextObject(GameObject textObj, Vector3 pos, string textString)
+        {
+            if (textObj == null) return;
+            textObj.transform.position = pos;
+            textObj.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+
+            UpdateTextComp(textObj, textString);
+        }
+
+        private static Component AddTextComp(GameObject go, string text, Color color)
+        {
+            if (tmpType != null)
+            {
+                Component tmp = go.AddComponent(tmpType);
+                SetProp(tmp, "text", text);
+                SetProp(tmp, "fontSize", 0.85f);
+                SetProp(tmp, "color", Color.white);
+                SetPropEnum(tmp, "alignment", "Center");
+                SetPropEnum(tmp, "fontStyle", "Bold");
+                return tmp;
+            }
+            else if (textMeshType != null)
+            {
+                Component tm = go.AddComponent(textMeshType);
+                SetProp(tm, "text", text);
+                SetProp(tm, "fontSize", 36);
+                SetProp(tm, "characterSize", 0.005f);
+                SetProp(tm, "color", Color.white);
+                SetPropEnum(tm, "alignment", "Center");
+                SetPropEnum(tm, "anchor", "MiddleCenter");
+                SetPropEnum(tm, "fontStyle", "Bold");
+                return tm;
+            }
+            return null;
+        }
+
+        private static void UpdateTextComp(GameObject go, string text)
+        {
+            if (go == null) return;
+            Component comp = (tmpType != null ? go.GetComponent(tmpType) : null)
+                          ?? (textMeshType != null ? go.GetComponent(textMeshType) : null);
+            if (comp != null)
+            {
+                SetProp(comp, "text", text);
+            }
+        }
+
+        private static void SetProp(object target, string propName, object val)
+        {
+            if (target == null) return;
+            try
+            {
+                var prop = target.GetType().GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (prop != null && prop.CanWrite)
+                {
+                    prop.SetValue(target, Convert.ChangeType(val, prop.PropertyType), null);
+                }
+            }
+            catch {}
+        }
+
+        private static void SetPropEnum(object target, string propName, string enumString)
+        {
+            if (target == null) return;
+            try
+            {
+                var prop = target.GetType().GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (prop != null && prop.CanWrite && prop.PropertyType.IsEnum)
+                {
+                    object enumVal = Enum.Parse(prop.PropertyType, enumString);
+                    prop.SetValue(target, enumVal, null);
+                }
+            }
+            catch {}
         }
     }
 }
