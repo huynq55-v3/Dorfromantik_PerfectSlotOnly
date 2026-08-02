@@ -13,7 +13,7 @@ namespace PerfectTriggerSlot
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
         private const string modName = "Perfect Trigger Slot Highlighter";
-        private const string modVersion = "17.0.0";
+        private const string modVersion = "18.0.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
@@ -85,9 +85,9 @@ namespace PerfectTriggerSlot
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
             Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} ACTIVE!");
-            Log.LogWarning(" - Placed Tiles: Red (4/4), Yellow (5/5), Green (6/6), Black (Imperfect)");
+            Log.LogWarning(" - Placed Tiles: Dynamic Red/Yellow/Green/Black updating on Preview Rotation");
             Log.LogWarning(" - Unplaced Slots: 27 Base Colors FROZEN in memory per held tile");
-            Log.LogWarning(" - Impossible Perfect Slots: GRAY (Only toggles GRAY <-> FROZEN BASE COLOR)");
+            Log.LogWarning(" - Impossible Perfect Slots: GRAY (Dynamic on Rotate, Restores Frozen Base Color)");
             Log.LogWarning(" - Current Tile Preset: Large Gold Text (Camera Aligned)");
             Log.LogWarning("=================================================");
         }
@@ -560,21 +560,35 @@ namespace PerfectTriggerSlot
             return (defaultDir + 3) % 6;
         }
 
-        private static MatchStatus GetTileMatchStatus(Tile centerTile, World world)
+        private static MatchStatus GetTileMatchStatus(Tile centerTile, World world, TileSlot previewSlot = null, Tile heldTile = null)
         {
             if (centerTile == null || world == null) return MatchStatus.None;
 
-            Vector2Int[] neighborPositions = GetNeighborPositions(centerTile.GridPos);
+            Vector2Int centerPos = centerTile.GridPos;
+            Vector2Int[] neighborPositions = GetNeighborPositions(centerPos);
             int filledCount = 0;
             bool allFilledMatched = true;
 
             for (int i = 0; i < 6; i++)
             {
-                Tile neighbor = world.GetTile(neighborPositions[i]);
+                Vector2Int nPos = neighborPositions[i];
+                Tile neighbor = world.GetTile(nPos);
                 if (neighbor != null)
                 {
-                    int oppositeDir = GetOppositeNeighborDir(centerTile.GridPos, neighbor.GridPos, i);
+                    int oppositeDir = GetOppositeNeighborDir(centerPos, neighbor.GridPos, i);
                     bool edgeMatch = CheckEdgeMatch(centerTile, i, neighbor, oppositeDir);
+
+                    if (!edgeMatch)
+                    {
+                        allFilledMatched = false;
+                    }
+                    filledCount++;
+                }
+                else if (previewSlot != null && heldTile != null && previewSlot.GridPos == nPos)
+                {
+                    // Ô kề i chính là previewTile đang cầm trên tay! Tính góc xoay hiện tại heldTile.RotationIndex
+                    int oppositeDir = GetOppositeNeighborDir(centerPos, nPos, i);
+                    bool edgeMatch = CheckEdgeMatchWithRot(heldTile, heldTile.RotationIndex, oppositeDir, centerTile, i);
 
                     if (!edgeMatch)
                     {
@@ -584,7 +598,7 @@ namespace PerfectTriggerSlot
                 }
             }
 
-            if (allFilledMatched)
+            if (allFilledMatched && filledCount > 0)
             {
                 if (filledCount == 6) return MatchStatus.SixMatch;
                 if (filledCount == 5) return MatchStatus.FiveMatch;
@@ -958,11 +972,14 @@ namespace PerfectTriggerSlot
             List<Tile> allPlacedTiles = world.GetAllPlacedTiles();
             if (allPlacedTiles == null) return;
 
+            Tile heldTile = GetCurrentHeldTile();
+            TileSlot previewSlot = GetCurrentPreviewSlot();
+
             Dictionary<Tile, MatchStatus> tileStatuses = new Dictionary<Tile, MatchStatus>();
             foreach (Tile centerTile in allPlacedTiles)
             {
                 if (centerTile == null) continue;
-                MatchStatus status = GetTileMatchStatus(centerTile, world);
+                MatchStatus status = GetTileMatchStatus(centerTile, world, previewSlot, heldTile);
                 if (status != MatchStatus.None)
                 {
                     tileStatuses[centerTile] = status;
@@ -1045,7 +1062,7 @@ namespace PerfectTriggerSlot
                     isBaseColorCacheDirty = false;
                 }
 
-                // 4. Kiểm tra XÁM ĐỘNG khi đang xoay/rê Tile trên tay (Chỉ chuyển sang Xám hoặc trả về Màu Gốc đóng băng)
+                // 4. Kiểm tra XÁM ĐỘNG ở CÁC Ô TRỐNG KỀ NẰM BÊN CẠNH TILE ĐANG ĐẶT XOAY
                 List<TileSlot> allSlotsEval = slotPreviewer.AllTileSlots;
                 if (allSlotsEval != null)
                 {
@@ -1093,14 +1110,14 @@ namespace PerfectTriggerSlot
         [HarmonyPostfix]
         private static void Postfix_RotatePreviewTile()
         {
-            ScanSlotsOnly();
+            RunFullScan();
         }
 
         [HarmonyPatch(typeof(TilePlacer), "ShowPreviewTileAt")]
         [HarmonyPostfix]
         private static void Postfix_ShowPreviewTileAt()
         {
-            ScanSlotsOnly();
+            RunFullScan();
         }
     }
 
