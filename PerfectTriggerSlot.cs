@@ -21,6 +21,7 @@ namespace PerfectTriggerSlot
         private static readonly Dictionary<Tile, GameObject> activeTileMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
         private static readonly Dictionary<Tile, GameObject> activeTilePresetTexts = new Dictionary<Tile, GameObject>();
+        private static int currentPerfectTileCount = 0;
 
         private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
 
@@ -914,6 +915,8 @@ namespace PerfectTriggerSlot
                 return;
             }
 
+            string fullText = presetTextStr + "\nPerfect: " + currentPerfectTileCount;
+
             Vector3 textPos = tile.transform.position + new Vector3(0f, 0.50f, 0f);
 
             Camera mainCam = Camera.main;
@@ -929,12 +932,12 @@ namespace PerfectTriggerSlot
 
             if (!activeTilePresetTexts.TryGetValue(tile, out GameObject textObj) || textObj == null)
             {
-                textObj = DynamicTextHelper.CreateTextObject("TilePresetText", textPos, targetRotation, presetTextStr);
+                textObj = DynamicTextHelper.CreateTextObject("TilePresetText", textPos, targetRotation, fullText);
                 activeTilePresetTexts[tile] = textObj;
             }
             else
             {
-                DynamicTextHelper.UpdateTextObject(textObj, textPos, targetRotation, presetTextStr);
+                DynamicTextHelper.UpdateTextObject(textObj, textPos, targetRotation, fullText);
             }
         }
 
@@ -976,6 +979,7 @@ namespace PerfectTriggerSlot
             TileSlot previewSlot = GetCurrentPreviewSlot();
 
             Dictionary<Tile, MatchStatus> tileStatuses = new Dictionary<Tile, MatchStatus>();
+            int perfectCount = 0;
             foreach (Tile centerTile in allPlacedTiles)
             {
                 if (centerTile == null) continue;
@@ -983,8 +987,13 @@ namespace PerfectTriggerSlot
                 if (status != MatchStatus.None)
                 {
                     tileStatuses[centerTile] = status;
+                    if (status == MatchStatus.SixMatch)
+                    {
+                        perfectCount++;
+                    }
                 }
             }
+            currentPerfectTileCount = perfectCount;
             UpdateTileMarkers(tileStatuses);
             UpdateCurrentHeldTilePresetTextOnly();
         }
