@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using BepInEx;
 using HarmonyLib;
 using UnityEngine;
@@ -12,29 +13,26 @@ namespace PerfectTriggerSlot
     public class PerfectTriggerSlotBase : BaseUnityPlugin
     {
         private const string modGUID = "JG.PerfectTriggerSlot";
-        private const string modName = "Perfect Trigger Slot Highlighter";
-        private const string modVersion = "18.0.0";
+        private const string modName = "Perfect Trigger Slot Highlighter & Deck Match Counter";
+        private const string modVersion = "20.0.0";
 
         private readonly Harmony harmony = new Harmony(modGUID);
         private static BepInEx.Logging.ManualLogSource Log;
 
+        // Quản lý hiển thị Tile đã đặt (Highlight đỏ/vàng/xanh/đen)
         private static readonly Dictionary<Tile, GameObject> activeTileMarkers = new Dictionary<Tile, GameObject>();
         private static readonly HashSet<Tile> currentlyHighlightedTiles = new HashSet<Tile>();
         private static readonly Dictionary<Tile, GameObject> activeTilePresetTexts = new Dictionary<Tile, GameObject>();
         private static int currentPerfectTileCount = 0;
 
+        // Quản lý hiển thị Ô trống (Marker 27 màu + Số đếm Tile khớp từ List)
         private static readonly Dictionary<TileSlot, GameObject> activeSlotMarkers = new Dictionary<TileSlot, GameObject>();
+        private static readonly Dictionary<TileSlot, GameObject> activeSlotCountTexts = new Dictionary<TileSlot, GameObject>();
 
-        private static readonly Color ImpossibleGrayColor = new Color(0.4f, 0.4f, 0.4f, 0.85f);
-
-        // Cache cố định 27 màu gốc (Hàm Max) cho Tile đang cầm trên tay
+        // Cache 27 màu gốc (Hàm Max) cho Tile đang cầm trên tay
         private static readonly Dictionary<TileSlot, Color> cachedBaseSlotColors = new Dictionary<TileSlot, Color>();
         private static Tile lastHeldTileInstance = null;
         private static bool isBaseColorCacheDirty = true;
-
-        // Cache cho ô bất khả thi tĩnh (trên lưới tile đã đặt vĩnh viễn)
-        private static readonly HashSet<TileSlot> cachedStaticImpossibleSlots = new HashSet<TileSlot>();
-        private static bool isStaticImpossibleCacheDirty = true;
 
         private enum MatchStatus { None, BlackMatch, FourMatch, FiveMatch, SixMatch }
 
@@ -67,37 +65,286 @@ namespace PerfectTriggerSlot
             }
         }
 
-        // Tối ưu hóa: Mã hóa địa hình thành ID số nguyên (0..15)
-        private static readonly Dictionary<GroupType, byte> groupTypeIdMap = new Dictionary<GroupType, byte>();
-        private static readonly Dictionary<string, byte> groupTypeIdStringMap = new Dictionary<string, byte>();
-        private static byte nextGroupTypeId = 1; // 0 dành cho null (Plain)
-
-        // Bảng tra nhanh Bitmask 32-bit cho các mẫu ô tile trong game
-        private static readonly HashSet<uint> validRotatedPatternKeys = new HashSet<uint>();
-        private static bool isPatternKeySetBuilt = false;
-        private static float lastPatternBuildTime = 0f;
-
+        // Bảng tra màu 27 trạng thái
         private static readonly Dictionary<KeyValuePair<int, int>, Color> slotColorMap = new Dictionary<KeyValuePair<int, int>, Color>();
+
+        // Field reflection cho Undo vô hạn
+        private static readonly FieldInfo maxUndoTurnsField = typeof(UndoTracker).GetField("maxUndoTurns", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+        // =========================================================================
+        // DANH SÁCH HARDCODE CÁC TILE CỦA BẠN
+        // =========================================================================
+        private static readonly string[] hardcodedTileList = new string[]
+        {
+            "3AA 1AV", "2CW", "2CW", "2CW", "2AA", "2BW 3AF 1AF", "4AW 2AF", "3AW 3AF", "4AA 2AF", "4AW 2AF",
+            "6AW", "2CW 2AF 2AA", "4AW 2AF", "6AV", "4AW 2AF", "1AF", "3AF", "6AF", "4AF", "2AA",
+            "3AW 3AF", "2BW 3AF 1AF", "6AW", "2CW 2AF 1AA", "6AW", "2CW 2AF 2AA", "6AW", "2CW", "6AW", "2CW 2AV 1AV",
+            "6AW", "4AA 2AF", "6AW", "3AW 3AF", "4BA 1AF 1AF", "6AA", "2BW 3AF 1AF", "2CW 2AF 2AA", "4AW 2AF", "2CW 2AF 2AA",
+            "6AW", "5AV 1AF", "3AW 3AF", "6AW", "6AW", "4AW 2AF", "2CW 2AF 2AA", "6AW", "3AW 3AF", "4AW 2AF",
+            "2CW", "4AW 2AF", "3AW 3AF", "4AW 2AF", "2CW 2AF 1AA", "2BW 3AF 1AF", "2BW 3AF 1AF", "6AA", "4AF", "2CW 2AF 2AA",
+            "2CW 2AF 2AA", "1AF 2AW", "6AW", "2AA 4AF", "6AW", "6AA", "4AA 2AF", "6AA", "6AW", "3AV 3AF",
+            "3AW 3AF", "4AA 2AF", "3AW 3AF", "2CW 2AF 2AA", "3AW 3AF", "2CW 2AF 1AA", "4AF", "2BW 3AF 1AF", "3AW 3AF", "3AW 3AF",
+            "2AA 4AF", "2CW", "2CW 2AV 1AV", "3AW 3AF", "6AF", "6AF", "6AW", "2CW 2AV 1AV", "2BW 3AF 1AF", "6AW",
+            "6AW", "2CW 2AF 2AA", "3AW 3AF", "3AW 3AF", "3AW 3AF", "6AF", "2CW 2AV 1AV", "2CW 2AF 2AA", "5AV 1AF", "6AV",
+            "4BF", "2BW", "2BW", "4AW", "2AW 2AW", "6AW", "3BW 1AF", "2BW 2AF", "4AW 2AF", "1AV 1AF",
+            "3BA", "2AW", "2AF 1AV 1AA", "2BW", "4AW", "2BW 2AA 1AA", "3CW 2AF 1AV", "2BW 1AV 1AF", "6AW", "2AV 2AF 1AA",
+            "2AW 1AF 1AV 1AV", "3AW 2BA", "5AW", "Plain", "3CW", "2AW 1AV", "3CV", "3CA 1AV", "2AW", "3CW 2AF",
+            "2BF 2AW", "4AW 2AV", "3BW 1AV", "1AV 1AV 1AF 1AA", "2CW", "4BA 1AF", "2CW 1AV", "1AA 1AF 1AA", "3BF 1AV", "1AA 1AF",
+            "3BW 1AV", "1AF 1AV", "3AV 3AW", "2AW", "4CV", "2CW 1AF", "3CV", "2AF 1AA", "2BW 2AV", "6AW",
+            "2CW 2AV", "1AV", "4CW 1AV 1AA", "2BW", "4CV", "3BW", "3AW 1AF", "4BW", "2BW", "3AW 3AF",
+            "2AW 2AW", "2BW 2AA", "2BW", "4BW", "2BW 2AF", "4BW", "2BV 2AW 1AF 1AF", "4BF 1AV 1AA", "3AW 1AF 1AA", "2AW",
+            "3CF", "4CF", "2CW 2AF 2AA", "3CV 1AA", "2AW 1AV", "3CW 1AA 1AF", "3DW", "2AW 2AW", "3CW 2AF", "2AV",
+            "4AV", "3DW", "1AV 1AF", "2BW 1AV", "4BV 1AA", "3AW 1AF", "3BV 1AA 1AA", "3AW 1AA", "1AV 1AF 1AF", "3DA 1AF 1AF",
+            "2AW", "3CW 2AF", "1AA 1AF 1AV 1AA", "3DW", "2AF 2AW 2AA", "4BW", "1AF 1AV", "3BF 1AV", "4AW 2AA", "2CW 2AV"
+        };
+
+        // Danh sách tile sau khi giải mã ra 6 cạnh
+        private struct CandidateTile
+        {
+            public byte[] edges; // 6 cạnh (0..5)
+        }
+        private static readonly List<CandidateTile> parsedTileDeck = new List<CandidateTile>();
 
         private void Awake()
         {
             Log = Logger;
             Initialize27DistinctRandomColors();
+            ParseHardcodedDeck();
             harmony.PatchAll(typeof(PerfectTriggerSlotBase));
             Log.LogWarning("=================================================");
             Log.LogWarning($"[PerfectTriggerSlot] v{modVersion} ACTIVE!");
+            Log.LogWarning($" - Deck Parsed: {parsedTileDeck.Count} tiles loaded for Match Counting");
+            Log.LogWarning(" - Unplaced Slots: 27 Base Colors FROZEN + Real-time Deck Match Count Numbers");
             Log.LogWarning(" - Placed Tiles: Dynamic Red/Yellow/Green/Black updating on Preview Rotation");
-            Log.LogWarning(" - Unplaced Slots: 27 Base Colors FROZEN in memory per held tile");
-            Log.LogWarning(" - Impossible Perfect Slots: GRAY (Dynamic on Rotate, Restores Frozen Base Color)");
-            Log.LogWarning(" - Current Tile Preset: Large Gold Text (Camera Aligned)");
+            Log.LogWarning(" - Infinite Undo: ACTIVE 🔄♾️");
             Log.LogWarning("=================================================");
+        }
+
+        // =========================================================================
+        // PARSER CHUỖI TILE SANG 6 CẠNH LỤC GIÁC
+        // =========================================================================
+        private static byte TerrainLetterToId(char letter)
+        {
+            switch (char.ToUpper(letter))
+            {
+                case 'V': return 1; // Village
+                case 'F': return 2; // Forest
+                case 'A': return 3; // Agriculture
+                case 'T': return 4; // TrainTracks
+                case 'W': return 5; // Water
+                default: return 0;  // Plain
+            }
+        }
+
+        private static int[] GetShapeBaseEdges(string shapeCode)
+        {
+            switch (shapeCode.ToUpper())
+            {
+                case "1A": return new int[] { 0 };
+                case "2A": return new int[] { 0, 1 };
+                case "2B": return new int[] { 0, 2 };
+                case "2C": return new int[] { 0, 3 };
+                case "3A": return new int[] { 0, 1, 2 };
+                case "3B": return new int[] { 0, 1, 3 };
+                case "3C": return new int[] { 0, 1, 4 };
+                case "3D": return new int[] { 0, 2, 4 };
+                case "4A": return new int[] { 0, 1, 2, 3 };
+                case "4B": return new int[] { 0, 1, 2, 4 };
+                case "4C": return new int[] { 0, 1, 3, 4 };
+                case "5A": return new int[] { 0, 1, 2, 3, 4 };
+                case "6A": return new int[] { 0, 1, 2, 3, 4, 5 };
+                default: return new int[] { 0 };
+            }
+        }
+
+        private static bool TryAssignSegments(List<KeyValuePair<int[], byte>> segments, int segIdx, byte[] currentEdges, out byte[] finalEdges)
+        {
+            if (segIdx >= segments.Count)
+            {
+                finalEdges = (byte[])currentEdges.Clone();
+                return true;
+            }
+
+            var seg = segments[segIdx];
+            for (int rot = 0; rot < 6; rot++)
+            {
+                bool fits = true;
+                for (int i = 0; i < seg.Key.Length; i++)
+                {
+                    int edgePos = (seg.Key[i] + rot) % 6;
+                    if (currentEdges[edgePos] != 0)
+                    {
+                        fits = false;
+                        break;
+                    }
+                }
+
+                if (fits)
+                {
+                    byte[] nextEdges = (byte[])currentEdges.Clone();
+                    for (int i = 0; i < seg.Key.Length; i++)
+                    {
+                        int edgePos = (seg.Key[i] + rot) % 6;
+                        nextEdges[edgePos] = seg.Value;
+                    }
+
+                    if (TryAssignSegments(segments, segIdx + 1, nextEdges, out finalEdges))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            finalEdges = null;
+            return false;
+        }
+
+        private static byte[] ParseTileString(string tileStr)
+        {
+            byte[] edges = new byte[6];
+            if (string.IsNullOrEmpty(tileStr) || tileStr.Trim().Equals("Plain", StringComparison.OrdinalIgnoreCase))
+            {
+                return edges; // 6 cạnh 0 (Plain)
+            }
+
+            string[] parts = tileStr.Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+            List<KeyValuePair<int[], byte>> segments = new List<KeyValuePair<int[], byte>>();
+
+            foreach (string part in parts)
+            {
+                if (part.Length < 3) continue;
+                string shapeCode = part.Substring(0, part.Length - 1);
+                char typeLetter = part[part.Length - 1];
+                int[] baseEdges = GetShapeBaseEdges(shapeCode);
+                byte terrainId = TerrainLetterToId(typeLetter);
+                segments.Add(new KeyValuePair<int[], byte>(baseEdges, terrainId));
+            }
+
+            if (segments.Count == 0) return edges;
+
+            if (TryAssignSegments(segments, 0, new byte[6], out byte[] result))
+            {
+                return result;
+            }
+
+            return edges;
+        }
+
+        private static void ParseHardcodedDeck()
+        {
+            parsedTileDeck.Clear();
+            foreach (string tileStr in hardcodedTileList)
+            {
+                byte[] edges = ParseTileString(tileStr);
+                parsedTileDeck.Add(new CandidateTile { edges = edges });
+            }
+        }
+
+        // =========================================================================
+        // BỘ ĐẾM MATCH 100% TỪ DANH SÁCH DECK
+        // =========================================================================
+        private static int CountMatchingTilesFromDeck(TileSlot slot, World world, TileSlot previewSlot = null, Tile heldTile = null)
+        {
+            if (slot == null || world == null || parsedTileDeck.Count == 0) return 0;
+
+            Vector2Int slotPos = slot.GridPos;
+            Vector2Int[] neighborPositions = GetNeighborPositions(slotPos);
+
+            byte[] reqTerrainIds = new byte[6];
+            bool[] isPlaced = new bool[6];
+            int placedCount = 0;
+
+            for (int i = 0; i < 6; i++)
+            {
+                Vector2Int nPos = neighborPositions[i];
+                Tile neighbor = world.GetTile(nPos);
+                if (neighbor != null)
+                {
+                    // Cạnh từ ô tile đã đặt vĩnh viễn
+                    int oppDir = GetOppositeNeighborDir(slotPos, neighbor.GridPos, i);
+                    ElementGroup elem = GetWorldElementGroup(neighbor, oppDir, null);
+                    reqTerrainIds[i] = GetTerrainId(elem?.GroupType);
+                    isPlaced[i] = true;
+                    placedCount++;
+                }
+                else if (previewSlot != null && heldTile != null && previewSlot.GridPos == nPos)
+                {
+                    // Cạnh từ ô previewTile đang cầm xoay ở previewSlot
+                    int oppDir = GetOppositeNeighborDir(slotPos, nPos, i);
+                    ElementGroup elem = GetWorldElementGroupWithRot(heldTile, oppDir, heldTile.RotationIndex, null);
+                    reqTerrainIds[i] = GetTerrainId(elem?.GroupType);
+                    isPlaced[i] = true;
+                    placedCount++;
+                }
+            }
+
+            if (placedCount == 0) return parsedTileDeck.Count;
+
+            int matchCount = 0;
+
+            foreach (var cand in parsedTileDeck)
+            {
+                bool tileCanMatch = false;
+
+                // Thử qua 6 góc xoay của candidate tile
+                for (int rot = 0; rot < 6; rot++)
+                {
+                    bool allEdgesMatch = true;
+                    for (int i = 0; i < 6; i++)
+                    {
+                        if (!isPlaced[i]) continue;
+                        byte candEdge = cand.edges[(i - rot + 600) % 6];
+                        if (candEdge != reqTerrainIds[i])
+                        {
+                            allEdgesMatch = false;
+                            break;
+                        }
+                    }
+
+                    if (allEdgesMatch)
+                    {
+                        tileCanMatch = true;
+                        break;
+                    }
+                }
+
+                if (tileCanMatch)
+                {
+                    matchCount++;
+                }
+            }
+
+            return matchCount;
+        }
+
+        // =========================================================================
+        // UNDO VÔ HẠN
+        // =========================================================================
+        private static void SetInfiniteUndo(UndoTracker tracker)
+        {
+            if (tracker == null) return;
+            try
+            {
+                if (maxUndoTurnsField != null)
+                {
+                    maxUndoTurnsField.SetValue(tracker, -1);
+                }
+                else
+                {
+                    Traverse.Create(tracker).Field("maxUndoTurns").SetValue(-1);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Log != null) Log.LogError($"Failed to apply infinite undo: {ex.Message}");
+            }
         }
 
         private static Vector2Int[] GetNeighborPositions(Vector2Int gridPos)
         {
             try
             {
-                var method = typeof(GridCalculator).GetMethod("GetNeighborGridPositions", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance);
+                var method = typeof(GridCalculator).GetMethod("GetNeighborGridPositions", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
                 if (method != null)
                 {
                     Vector2Int[] result = (Vector2Int[])method.Invoke(null, new object[] { gridPos });
@@ -132,260 +379,19 @@ namespace PerfectTriggerSlot
 
         private static void InvalidateCache()
         {
-            isStaticImpossibleCacheDirty = true;
             isBaseColorCacheDirty = true;
         }
 
         private static byte GetTerrainId(GroupType groupType)
         {
             if (groupType == null) return 0;
-            if (groupTypeIdMap.TryGetValue(groupType, out byte id)) return id;
-
-            string idKey = groupType.id.ToString();
-            if (string.IsNullOrEmpty(idKey) && !string.IsNullOrEmpty(groupType.name))
-            {
-                idKey = groupType.name;
-            }
-
-            if (groupTypeIdStringMap.TryGetValue(idKey, out byte strId))
-            {
-                groupTypeIdMap[groupType] = strId;
-                return strId;
-            }
-
-            byte newId = nextGroupTypeId++;
-            groupTypeIdMap[groupType] = newId;
-            if (!string.IsNullOrEmpty(idKey)) groupTypeIdStringMap[idKey] = newId;
-            return newId;
-        }
-
-        private static uint PackPatternKey(byte[] edgeIds)
-        {
-            uint key = 0;
-            for (int i = 0; i < 6; i++)
-            {
-                key |= ((uint)(edgeIds[i] & 0x0F)) << (i * 4);
-            }
-            return key;
-        }
-
-        private static void BuildFastPatternKeySet()
-        {
-            if (isPatternKeySetBuilt && Time.time - lastPatternBuildTime < 15f) return;
-
-            validRotatedPatternKeys.Clear();
-            try
-            {
-                var genConfigs = Resources.FindObjectsOfTypeAll<TileGenConfiguration>();
-                if (genConfigs != null && genConfigs.Length > 0)
-                {
-                    foreach (var config in genConfigs)
-                    {
-                        if (config == null || config.allTilePresets == null) continue;
-                        foreach (var presetConfig in config.allTilePresets)
-                        {
-                            if (presetConfig == null || presetConfig.segmentProbabilities == null) continue;
-                            AddPresetToPatternKeys(presetConfig.segmentProbabilities);
-                        }
-                    }
-                }
-
-                if (validRotatedPatternKeys.Count == 0)
-                {
-                    var generators = Resources.FindObjectsOfTypeAll<TileGenerator>();
-                    if (generators != null)
-                    {
-                        foreach (var gen in generators)
-                        {
-                            if (gen != null && gen.Configuration != null && gen.Configuration.allTilePresets != null)
-                            {
-                                foreach (var presetConfig in gen.Configuration.allTilePresets)
-                                {
-                                    if (presetConfig == null || presetConfig.segmentProbabilities == null) continue;
-                                    AddPresetToPatternKeys(presetConfig.segmentProbabilities);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (validRotatedPatternKeys.Count == 0)
-                {
-                    Tile[] instantiatedTiles = Resources.FindObjectsOfTypeAll<Tile>();
-                    if (instantiatedTiles != null)
-                    {
-                        foreach (Tile t in instantiatedTiles)
-                        {
-                            if (t == null || t.AllElementGroupSegments == null) continue;
-                            byte[] edges = new byte[6];
-                            for (int i = 0; i < 6; i++)
-                            {
-                                ElementGroup eg = t.GetElementGroup(i, Space.Self, null);
-                                edges[i] = GetTerrainId(eg?.GroupType);
-                            }
-                            AddRotatedKeys(edges);
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                if (Log != null) Log.LogError($"Error building fast pattern keys: {ex.Message}");
-            }
-
-            if (validRotatedPatternKeys.Count > 0)
-            {
-                isPatternKeySetBuilt = true;
-                lastPatternBuildTime = Time.time;
-            }
-        }
-
-        private static void AddPresetToPatternKeys(List<SegmentPresetInfo> segmentProbabilities)
-        {
-            List<List<GroupType>> segmentOptions = new List<List<GroupType>>();
-            List<List<int>> segmentEdgeIndices = new List<List<int>>();
-
-            foreach (var segInfo in segmentProbabilities)
-            {
-                if (segInfo == null || segInfo.segmentType == null || segInfo.segmentType.edges == null) continue;
-
-                List<GroupType> options = new List<GroupType>();
-                if (segInfo.possibleTypes != null)
-                {
-                    foreach (var gtConfig in segInfo.possibleTypes)
-                    {
-                        if (gtConfig != null && gtConfig.groupType != null)
-                        {
-                            if (!options.Contains(gtConfig.groupType))
-                            {
-                                options.Add(gtConfig.groupType);
-                            }
-                        }
-                    }
-                }
-                if (options.Count == 0) options.Add(null);
-
-                segmentOptions.Add(options);
-                segmentEdgeIndices.Add(segInfo.segmentType.edges);
-            }
-
-            if (segmentOptions.Count == 0) return;
-
-            List<byte[]> combinations = new List<byte[]>();
-            GenerateCombinationsRecursive(segmentOptions, segmentEdgeIndices, 0, new byte[6], combinations);
-
-            foreach (var combo in combinations)
-            {
-                AddRotatedKeys(combo);
-            }
-        }
-
-        private static void AddRotatedKeys(byte[] baseEdges)
-        {
-            for (int rot = 0; rot < 6; rot++)
-            {
-                byte[] rotated = new byte[6];
-                for (int i = 0; i < 6; i++)
-                {
-                    rotated[i] = baseEdges[(i - rot + 600) % 6];
-                }
-                validRotatedPatternKeys.Add(PackPatternKey(rotated));
-            }
-        }
-
-        private static void GenerateCombinationsRecursive(
-            List<List<GroupType>> segmentOptions,
-            List<List<int>> segmentEdgeIndices,
-            int currentSegmentIndex,
-            byte[] currentEdges,
-            List<byte[]> result)
-        {
-            if (currentSegmentIndex >= segmentOptions.Count)
-            {
-                byte[] copy = new byte[6];
-                Array.Copy(currentEdges, copy, 6);
-                result.Add(copy);
-                return;
-            }
-
-            List<GroupType> options = segmentOptions[currentSegmentIndex];
-            List<int> edgeIndices = segmentEdgeIndices[currentSegmentIndex];
-
-            foreach (GroupType option in options)
-            {
-                byte terrainId = GetTerrainId(option);
-                byte[] nextEdges = new byte[6];
-                Array.Copy(currentEdges, nextEdges, 6);
-
-                foreach (int edgeIdx in edgeIndices)
-                {
-                    if (edgeIdx >= 0 && edgeIdx < 6)
-                    {
-                        nextEdges[edgeIdx] = terrainId;
-                    }
-                }
-
-                GenerateCombinationsRecursive(segmentOptions, segmentEdgeIndices, currentSegmentIndex + 1, nextEdges, result);
-            }
-        }
-
-        // Kiểm tra tính khả thi Perfect match cho ô trống (tính cả ô Tile kề đang đặt/xoay ở previewSlot)
-        private static bool CanSlotAchievePerfectMatchFast(TileSlot slot, World world, TileSlot previewSlot = null, Tile heldTile = null)
-        {
-            if (slot == null || world == null) return true;
-            BuildFastPatternKeySet();
-            if (validRotatedPatternKeys.Count == 0) return true;
-
-            Vector2Int slotPos = slot.GridPos;
-            Vector2Int[] neighborPositions = GetNeighborPositions(slotPos);
-
-            byte[] reqTerrainIds = new byte[6];
-            bool[] isPlaced = new bool[6];
-            int placedCount = 0;
-
-            for (int i = 0; i < 6; i++)
-            {
-                Vector2Int nPos = neighborPositions[i];
-                Tile neighbor = world.GetTile(nPos);
-                if (neighbor != null)
-                {
-                    // Ô kề đã đặt vĩnh viễn trên bản đồ
-                    int oppDir = GetOppositeNeighborDir(slotPos, neighbor.GridPos, i);
-                    ElementGroup elem = GetWorldElementGroup(neighbor, oppDir, null);
-                    reqTerrainIds[i] = GetTerrainId(elem?.GroupType);
-                    isPlaced[i] = true;
-                    placedCount++;
-                }
-                else if (previewSlot != null && heldTile != null && previewSlot.GridPos == nPos)
-                {
-                    // Ô kề chính là ô đang đặt previewTile! Cạnh chĩa sang ô slot phụ thuộc vào góc xoay heldTile.RotationIndex
-                    int oppDir = GetOppositeNeighborDir(slotPos, nPos, i);
-                    ElementGroup elem = GetWorldElementGroupWithRot(heldTile, oppDir, heldTile.RotationIndex, null);
-                    reqTerrainIds[i] = GetTerrainId(elem?.GroupType);
-                    isPlaced[i] = true;
-                    placedCount++;
-                }
-            }
-
-            if (placedCount < 2) return true;
-
-            foreach (uint key in validRotatedPatternKeys)
-            {
-                bool matchAll = true;
-                for (int i = 0; i < 6; i++)
-                {
-                    if (!isPlaced[i]) continue;
-                    byte candId = (byte)((key >> (i * 4)) & 0x0F);
-                    if (candId != reqTerrainIds[i])
-                    {
-                        matchAll = false;
-                        break;
-                    }
-                }
-                if (matchAll) return true;
-            }
-
-            return false;
+            string name = groupType.name ?? groupType.id.ToString();
+            if (name.IndexOf("Village", StringComparison.OrdinalIgnoreCase) >= 0) return 1;
+            if (name.IndexOf("Forest", StringComparison.OrdinalIgnoreCase) >= 0) return 2;
+            if (name.IndexOf("Agriculture", StringComparison.OrdinalIgnoreCase) >= 0) return 3;
+            if (name.IndexOf("Train", StringComparison.OrdinalIgnoreCase) >= 0) return 4;
+            if (name.IndexOf("Water", StringComparison.OrdinalIgnoreCase) >= 0) return 5;
+            return 0;
         }
 
         private static void Initialize27DistinctRandomColors()
@@ -549,7 +555,7 @@ namespace PerfectTriggerSlot
         {
             try
             {
-                var method = typeof(GridCalculator).GetMethod("GetNeighborIndexFromGridPos", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance);
+                var method = typeof(GridCalculator).GetMethod("GetNeighborIndexFromGridPos", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
                 if (method != null)
                 {
                     object res = method.Invoke(null, new object[] { toPos, fromPos });
@@ -587,7 +593,6 @@ namespace PerfectTriggerSlot
                 }
                 else if (previewSlot != null && heldTile != null && previewSlot.GridPos == nPos)
                 {
-                    // Ô kề i chính là previewTile đang cầm trên tay! Tính góc xoay hiện tại heldTile.RotationIndex
                     int oppositeDir = GetOppositeNeighborDir(centerPos, nPos, i);
                     bool edgeMatch = CheckEdgeMatchWithRot(heldTile, heldTile.RotationIndex, oppositeDir, centerTile, i);
 
@@ -650,7 +655,6 @@ namespace PerfectTriggerSlot
 
             int maxMatch = -1;
 
-            // Duyệt qua cả 6 góc xoay để lấy MAX MATCH cố định cho heldTile
             for (int rot = 0; rot < 6; rot++)
             {
                 int matchCount = 0;
@@ -756,17 +760,11 @@ namespace PerfectTriggerSlot
             }
         }
 
-        private static void UpdateSlotMarkers(Dictionary<TileSlot, Color> slotColors, HashSet<TileSlot> impossibleSlots = null)
+        private static void UpdateSlotMarkersAndCounts(Dictionary<TileSlot, Color> slotColors, Dictionary<TileSlot, int> slotMatchCounts)
         {
             HashSet<TileSlot> allActiveSlots = new HashSet<TileSlot>(slotColors.Keys);
-            if (impossibleSlots != null)
-            {
-                foreach (TileSlot s in impossibleSlots)
-                {
-                    if (s != null) allActiveSlots.Add(s);
-                }
-            }
 
+            // Xóa marker thừa
             List<TileSlot> toRemove = new List<TileSlot>();
             foreach (var kvp in activeSlotMarkers)
             {
@@ -778,29 +776,35 @@ namespace PerfectTriggerSlot
             }
             foreach (TileSlot s in toRemove) activeSlotMarkers.Remove(s);
 
+            // Xóa text thừa
+            List<TileSlot> textToRemove = new List<TileSlot>();
+            foreach (var kvp in activeSlotCountTexts)
+            {
+                if (kvp.Key == null || !allActiveSlots.Contains(kvp.Key))
+                {
+                    if (kvp.Value != null) UnityEngine.Object.Destroy(kvp.Value);
+                    textToRemove.Add(kvp.Key);
+                }
+            }
+            foreach (TileSlot s in textToRemove) activeSlotCountTexts.Remove(s);
+
+            Camera mainCam = Camera.main;
+            Quaternion targetRotation = (mainCam != null)
+                ? Quaternion.Euler(90f, mainCam.transform.eulerAngles.y, 0f)
+                : Quaternion.Euler(90f, 0f, 0f);
+
             foreach (TileSlot slot in allActiveSlots)
             {
                 if (slot == null) continue;
 
-                Color targetColor;
-                // Nếu slot bị bất khả thi -> Ưu tiên hiện màu XÁM
-                if (impossibleSlots != null && impossibleSlots.Contains(slot))
-                {
-                    targetColor = ImpossibleGrayColor;
-                }
-                // Nếu slot không bị bất khả thi -> Trả về đúng MÀU GỐC HÀM MAX BỊ ĐÓNG BĂNG TRONG CACHE của nó
-                else if (slotColors.TryGetValue(slot, out Color baseColor))
-                {
-                    targetColor = baseColor;
-                }
-                else
-                {
-                    targetColor = new Color(0.5f, 0.5f, 0.5f, 0.5f);
-                }
+                Color targetColor = slotColors.TryGetValue(slot, out Color baseColor) ? baseColor : new Color(0.5f, 0.5f, 0.5f, 0.5f);
+                int count = slotMatchCounts.TryGetValue(slot, out int c) ? c : 0;
 
+                // 1. Cập nhật / tạo hình trụ Marker 27 màu gốc
+                Vector3 markerPos = slot.transform.position + new Vector3(0f, 0.25f, 0f);
                 if (!activeSlotMarkers.ContainsKey(slot) || activeSlotMarkers[slot] == null)
                 {
-                    GameObject marker = CreateMarkerObject("SlotStateMarker", slot.transform.position + new Vector3(0f, 0.25f, 0f), targetColor, new Vector3(0.325f, 0.04f, 0.325f));
+                    GameObject marker = CreateMarkerObject("SlotStateMarker", markerPos, targetColor, new Vector3(0.325f, 0.04f, 0.325f));
                     activeSlotMarkers[slot] = marker;
                 }
                 else
@@ -810,6 +814,20 @@ namespace PerfectTriggerSlot
                     {
                         r.material.color = targetColor;
                     }
+                }
+
+                // 2. Cập nhật / tạo Text 3D đếm số tile khớp đặt ngay trên mặt marker
+                Vector3 textPos = slot.transform.position + new Vector3(0f, 0.30f, 0f);
+                string countStr = count.ToString();
+
+                if (!activeSlotCountTexts.TryGetValue(slot, out GameObject countObj) || countObj == null)
+                {
+                    countObj = DynamicTextHelper.CreateTextObject("SlotCountText", textPos, targetRotation, countStr, 3.0f, Color.white);
+                    activeSlotCountTexts[slot] = countObj;
+                }
+                else
+                {
+                    DynamicTextHelper.UpdateTextObject(countObj, textPos, targetRotation, countStr, Color.white);
                 }
             }
         }
@@ -916,28 +934,21 @@ namespace PerfectTriggerSlot
             }
 
             string fullText = presetTextStr + "\nPerfect: " + currentPerfectTileCount;
-
             Vector3 textPos = tile.transform.position + new Vector3(0f, 0.50f, 0f);
 
             Camera mainCam = Camera.main;
-            Quaternion targetRotation;
-            if (mainCam != null)
-            {
-                targetRotation = Quaternion.Euler(90f, mainCam.transform.eulerAngles.y, 0f);
-            }
-            else
-            {
-                targetRotation = Quaternion.Euler(90f, 0f, 0f);
-            }
+            Quaternion targetRotation = (mainCam != null)
+                ? Quaternion.Euler(90f, mainCam.transform.eulerAngles.y, 0f)
+                : Quaternion.Euler(90f, 0f, 0f);
 
             if (!activeTilePresetTexts.TryGetValue(tile, out GameObject textObj) || textObj == null)
             {
-                textObj = DynamicTextHelper.CreateTextObject("TilePresetText", textPos, targetRotation, fullText);
+                textObj = DynamicTextHelper.CreateTextObject("TilePresetText", textPos, targetRotation, fullText, 4.25f, new Color(1.0f, 0.843f, 0.0f, 1.0f));
                 activeTilePresetTexts[tile] = textObj;
             }
             else
             {
-                DynamicTextHelper.UpdateTextObject(textObj, textPos, targetRotation, fullText);
+                DynamicTextHelper.UpdateTextObject(textObj, textPos, targetRotation, fullText, new Color(1.0f, 0.843f, 0.0f, 1.0f));
             }
         }
 
@@ -965,6 +976,20 @@ namespace PerfectTriggerSlot
         private void LateUpdate()
         {
             UpdateCurrentHeldTilePresetTextOnly();
+
+            // Cập nhật hướng xoay của text số đếm ô theo Camera
+            Camera mainCam = Camera.main;
+            if (mainCam != null)
+            {
+                Quaternion rot = Quaternion.Euler(90f, mainCam.transform.eulerAngles.y, 0f);
+                foreach (var kvp in activeSlotCountTexts)
+                {
+                    if (kvp.Value != null)
+                    {
+                        kvp.Value.transform.rotation = rot;
+                    }
+                }
+            }
         }
 
         public static void ScanPlacedTilesOnly()
@@ -1003,52 +1028,15 @@ namespace PerfectTriggerSlot
             World world = UnityEngine.Object.FindObjectOfType<World>();
             if (world == null) return;
 
-            HashSet<TileSlot> currentImpossibleSlots = new HashSet<TileSlot>();
-
             Tile heldTile = GetCurrentHeldTile();
             TileSlot previewSlot = GetCurrentPreviewSlot();
             TileSlotPreviewer slotPreviewer = UnityEngine.Object.FindObjectOfType<TileSlotPreviewer>();
 
+            Dictionary<TileSlot, int> currentSlotMatchCounts = new Dictionary<TileSlot, int>();
+
             if (slotPreviewer != null)
             {
-                // 1. Cập nhật cache ô bất khả thi tĩnh (khi chốt đặt ô vĩnh viễn)
-                if (isStaticImpossibleCacheDirty)
-                {
-                    cachedStaticImpossibleSlots.Clear();
-                    List<TileSlot> allSlots = slotPreviewer.AllTileSlots;
-                    if (allSlots != null)
-                    {
-                        foreach (TileSlot slot in allSlots)
-                        {
-                            if (slot == null) continue;
-
-                            Vector2Int[] neighborPositions = GetNeighborPositions(slot.GridPos);
-                            int filledNeighbors = 0;
-                            for (int i = 0; i < 6; i++)
-                            {
-                                if (world.GetTile(neighborPositions[i]) != null)
-                                    filledNeighbors++;
-                            }
-
-                            if (filledNeighbors >= 2)
-                            {
-                                if (!CanSlotAchievePerfectMatchFast(slot, world, null, null))
-                                {
-                                    cachedStaticImpossibleSlots.Add(slot);
-                                }
-                            }
-                        }
-                    }
-                    isStaticImpossibleCacheDirty = false;
-                }
-
-                // 2. Thêm tất cả các ô tĩnh bất khả thi vào danh sách Xám hiện tại
-                foreach (TileSlot s in cachedStaticImpossibleSlots)
-                {
-                    if (s != null) currentImpossibleSlots.Add(s);
-                }
-
-                // 3. ĐÓNG BĂNG TUYỆT ĐỐI MÀU GỐC HÀM MAX CHO TILE ĐANG CẦM (Chỉ tính lại khi đổi Tile hoặc đặt Tile)
+                // 1. Đóng băng màu 27 trạng thái của ô cho Tile đang cầm
                 if (heldTile != lastHeldTileInstance || isBaseColorCacheDirty)
                 {
                     cachedBaseSlotColors.Clear();
@@ -1071,33 +1059,53 @@ namespace PerfectTriggerSlot
                     isBaseColorCacheDirty = false;
                 }
 
-                // 4. Kiểm tra XÁM ĐỘNG ở CÁC Ô TRỐNG KỀ NẰM BÊN CẠNH TILE ĐANG ĐẶT XOAY
+                // 2. Tính toán số lượng Tile từ Deck khớp 100% cho TẤT CẢ các ô trống
                 List<TileSlot> allSlotsEval = slotPreviewer.AllTileSlots;
                 if (allSlotsEval != null)
                 {
                     foreach (TileSlot slot in allSlotsEval)
                     {
                         if (slot == null) continue;
-
-                        // Nếu chưa bị xám tĩnh, kiểm tra các ô trống kề xem việc xoay previewTile ở vị trí hiện tại có làm ô trống kề bị XÁM ĐỘNG không
-                        if (!currentImpossibleSlots.Contains(slot))
-                        {
-                            if (!CanSlotAchievePerfectMatchFast(slot, world, previewSlot, heldTile))
-                            {
-                                currentImpossibleSlots.Add(slot);
-                            }
-                        }
+                        // Tự động xử lý cả ô tĩnh lẫn ô động quanh previewSlot đang xoay
+                        int count = CountMatchingTilesFromDeck(slot, world, previewSlot, heldTile);
+                        currentSlotMatchCounts[slot] = count;
                     }
                 }
             }
 
-            UpdateSlotMarkers(cachedBaseSlotColors, currentImpossibleSlots);
+            UpdateSlotMarkersAndCounts(cachedBaseSlotColors, currentSlotMatchCounts);
         }
 
         public static void RunFullScan()
         {
             ScanPlacedTilesOnly();
             ScanSlotsOnly();
+        }
+
+        // ==========================================
+        // Harmony Patches
+        // ==========================================
+
+        [HarmonyPatch(typeof(UndoTracker), "Awake")]
+        [HarmonyPostfix]
+        private static void Postfix_UndoTracker_Awake(UndoTracker __instance)
+        {
+            SetInfiniteUndo(__instance);
+        }
+
+        [HarmonyPatch(typeof(UndoTracker), "StoreTurn")]
+        [HarmonyPrefix]
+        private static void Prefix_UndoTracker_StoreTurn(UndoTracker __instance)
+        {
+            SetInfiniteUndo(__instance);
+        }
+
+        [HarmonyPatch(typeof(TilePlacementEventBroadcaster), "BroadcastTurnUndone")]
+        [HarmonyPostfix]
+        private static void Postfix_BroadcastTurnUndone()
+        {
+            InvalidateCache();
+            RunFullScan();
         }
 
         [HarmonyPatch(typeof(TileSlotPreviewer), "UpdateTileSlotValidity")]
@@ -1107,7 +1115,7 @@ namespace PerfectTriggerSlot
             RunFullScan();
         }
 
-        [HarmonyPatch(typeof(Dorfromantik.TilePlacementEventBroadcaster), "BroadcastTilePlacedFinalized")]
+        [HarmonyPatch(typeof(TilePlacementEventBroadcaster), "BroadcastTilePlacedFinalized")]
         [HarmonyPostfix]
         private static void Postfix_BroadcastTilePlacedFinalized()
         {
@@ -1136,8 +1144,6 @@ namespace PerfectTriggerSlot
         private static Type textMeshType;
         private static bool searched = false;
 
-        private static readonly Color GoldColor = new Color(1.0f, 0.843f, 0.0f, 1.0f);
-
         private static void InitTypes()
         {
             if (searched) return;
@@ -1150,34 +1156,34 @@ namespace PerfectTriggerSlot
             }
         }
 
-        public static GameObject CreateTextObject(string name, Vector3 pos, Quaternion rotation, string textString)
+        public static GameObject CreateTextObject(string name, Vector3 pos, Quaternion rotation, string textString, float fontSize = 4.25f, Color? textColor = null)
         {
             InitTypes();
             GameObject textObj = new GameObject(name);
             textObj.transform.position = pos;
             textObj.transform.rotation = rotation;
 
-            AddTextComp(textObj, textString);
+            AddTextComp(textObj, textString, fontSize, textColor ?? Color.white);
             return textObj;
         }
 
-        public static void UpdateTextObject(GameObject textObj, Vector3 pos, Quaternion rotation, string textString)
+        public static void UpdateTextObject(GameObject textObj, Vector3 pos, Quaternion rotation, string textString, Color? textColor = null)
         {
             if (textObj == null) return;
             textObj.transform.position = pos;
             textObj.transform.rotation = rotation;
 
-            UpdateTextComp(textObj, textString);
+            UpdateTextComp(textObj, textString, textColor);
         }
 
-        private static Component AddTextComp(GameObject go, string text)
+        private static Component AddTextComp(GameObject go, string text, float fontSize, Color color)
         {
             if (tmpType != null)
             {
                 Component tmp = go.AddComponent(tmpType);
                 SetProp(tmp, "text", text);
-                SetProp(tmp, "fontSize", 4.25f);
-                SetProp(tmp, "color", GoldColor);
+                SetProp(tmp, "fontSize", fontSize);
+                SetProp(tmp, "color", color);
                 SetPropEnum(tmp, "alignment", "Center");
                 SetPropEnum(tmp, "fontStyle", "Bold");
                 return tmp;
@@ -1186,9 +1192,9 @@ namespace PerfectTriggerSlot
             {
                 Component tm = go.AddComponent(textMeshType);
                 SetProp(tm, "text", text);
-                SetProp(tm, "fontSize", 180);
-                SetProp(tm, "characterSize", 0.025f);
-                SetProp(tm, "color", GoldColor);
+                SetProp(tm, "fontSize", (int)(fontSize * 40));
+                SetProp(tm, "characterSize", 0.02f);
+                SetProp(tm, "color", color);
                 SetPropEnum(tm, "alignment", "Center");
                 SetPropEnum(tm, "anchor", "MiddleCenter");
                 SetPropEnum(tm, "fontStyle", "Bold");
@@ -1197,7 +1203,7 @@ namespace PerfectTriggerSlot
             return null;
         }
 
-        private static void UpdateTextComp(GameObject go, string text)
+        private static void UpdateTextComp(GameObject go, string text, Color? color = null)
         {
             if (go == null) return;
             Component comp = (tmpType != null ? go.GetComponent(tmpType) : null)
@@ -1205,7 +1211,10 @@ namespace PerfectTriggerSlot
             if (comp != null)
             {
                 SetProp(comp, "text", text);
-                SetProp(comp, "color", GoldColor);
+                if (color.HasValue)
+                {
+                    SetProp(comp, "color", color.Value);
+                }
             }
         }
 
@@ -1214,7 +1223,7 @@ namespace PerfectTriggerSlot
             if (target == null) return;
             try
             {
-                var prop = target.GetType().GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                var prop = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
                 if (prop != null && prop.CanWrite)
                 {
                     prop.SetValue(target, Convert.ChangeType(val, prop.PropertyType), null);
@@ -1228,7 +1237,7 @@ namespace PerfectTriggerSlot
             if (target == null) return;
             try
             {
-                var prop = target.GetType().GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                var prop = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
                 if (prop != null && prop.CanWrite && prop.PropertyType.IsEnum)
                 {
                     object enumVal = Enum.Parse(prop.PropertyType, enumString);
